@@ -14,7 +14,7 @@
 - **Fully local pipeline** — ASR by [Qwen3-ASR](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-8bit) (MLX, Apple Silicon native) + cleanup by a small Ollama LLM (thinking disabled, latency-first)
 - **Waveform HUD** — a Siri-inspired floating energy line: appears from its center while listening, collapses back into the center when done; `Listening` / `Thinking` states with distinct motion & color treatment
 - **Speech-gated visualization** — Silero VAD (onnxruntime, CPU) ensures only your voice drives the waveform; keyboard clicks, fans and door slams leave it perfectly flat. Visual gating only — ASR always receives the untouched raw audio
-- **Personal memory** — it learns from your corrections: fix a wrong word, select it, tap `Ctrl+Fn`, and the correction pair is stored in a local SQLite dictionary and immediately re-injected as ASR hotwords + LLM constraints. The more you use it, the fewer mistakes it makes
+- **Personal memory** — it learns from your corrections **automatically**: after typing, WaveType watches the target field (Accessibility API, ~60s window); if you edit what it wrote, the correction pair is diffed out and stored in a local SQLite dictionary, then immediately re-injected as ASR hotwords + LLM constraints. No gestures needed. (For apps where AX readback fails, select the corrected text and tap `Ctrl+Fn` instead.) The more you use it, the fewer mistakes it makes
 - **Plain-text lists** — spoken enumerations become `1. 2. 3.` numbered lists with Tab indentation. No Markdown symbols leaking into your input fields
 - **Anti-hallucination guardrails** — fidelity-first prompt + repetition-loop detection + length-ratio fallback to raw ASR output
 

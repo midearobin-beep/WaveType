@@ -33,3 +33,7 @@ vad:
   # Silero VAD（约 2MB）：波形只对人声响应，键盘/风扇声不触发
   # 下载：curl -L -o models/silero_vad.onnx https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx
   model: models/silero_vad.onnx
+
+autolearn:
+  enabled: true           # watch the target field after injection; user edits
+                          # are auto-learned into the dictionary (Typeless-style)

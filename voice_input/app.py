@@ -19,6 +19,7 @@ from pathlib import Path
 
 import yaml
 
+from .autolearn import AutoLearner
 from .hotkey import FnHotkey
 from .inject import type_text
 from .learn import extract_wrong
@@ -63,10 +64,14 @@ class VoiceInputApp:
         self._last_raw = ""
         self._last_polished = ""
         self._quit = False
+        self._autolearn = AutoLearner(self._memory, self._refresh_dictionary) \
+            if cfg.get("autolearn", {}).get("enabled", True) else None
 
     # ---- 热键回调（event tap 线程） ----
 
     def _on_press(self) -> None:
+        if self._autolearn is not None:
+            self._autolearn.stop()  # 开始新一次听写，停止监视上一段
         self._recorder.start()
         if self._hud is not None:
             from PyObjCTools import AppHelper
@@ -146,6 +151,8 @@ class VoiceInputApp:
         type_text(final, **self._inject_cfg)
         self._last_raw, self._last_polished = text, final
         self._memory.log_history(text, final, app)
+        if self._autolearn is not None:
+            self._autolearn.watch(final)  # Typeless 式：监视用户改动，自动入库
         if self._hud is not None:
             from PyObjCTools import AppHelper
             AppHelper.callAfter(self._hud.hide)  # 上屏完成 → 波形收拢消失

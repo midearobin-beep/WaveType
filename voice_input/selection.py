@@ -66,3 +66,23 @@ def read_selected_text() -> str | None:
         return text
     log.info("未读到选区")
     return None
+
+
+def read_focused_value() -> str | None:
+    """读焦点输入框的完整内容（AX API）。
+
+    供自动纠错学习轮询使用。失败/无焦点返回 None。
+    超长文档截断（diff 成本保护）。
+    """
+    try:
+        system = AXUIElementCreateSystemWide()
+        err, focused = AXUIElementCopyAttributeValue(
+            system, kAXFocusedUIElementAttribute, None)
+        if err != 0 or focused is None:
+            return None
+        err, value = AXUIElementCopyAttributeValue(focused, "AXValue", None)
+        if err != 0 or value is None or not isinstance(value, str):
+            return None
+        return value[:50000]
+    except Exception:
+        return None
