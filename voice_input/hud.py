@@ -46,7 +46,7 @@ class C:
     HUD_HEIGHT = 88.0           # 70–100
     BOTTOM_MARGIN = 128.0       # 距屏幕底边 100–160
     LINE_WIDTH = 1.9            # 1.5–2.2（中心最粗，两端经 taper mask 渐细）
-    TAPER_RATIO = 0.08          # 两端渐细区占比
+    TAPER_RATIO = 0.18          # 两端渐细区占比（更明显的锥形）
     GLOW_STRENGTH = 0.22        # 辉光不透明度基线（15–30%）
     GRADIENT_SPEED = 0.05       # Listening 渐变流动（相位/秒）
     THINK_GRADIENT_SPEED = 0.02  # Thinking 更慢
@@ -140,12 +140,12 @@ class WaveformModel:
         if state == "thinking":
             self.think_t = 0.0
 
-    def tick(self, dt: float, rms: float) -> None:
+    def tick(self, dt: float, rms: float, speech_prob: float = 1.0) -> None:
         self.phase += dt * C.PHASE_SPEED
         speed = C.THINK_GRADIENT_SPEED if self.state == "thinking" else C.GRADIENT_SPEED
         self.gradient_phase += dt * speed
         if self.visible and self.state == "listening":
-            self.level = self._processor.process(rms)  # 静默=0，平线
+            self.level = self._processor.process(rms, speech_prob)  # 非人声=平线
         elif self.state == "thinking":
             self.think_t += dt
             self.level *= 0.95  # 听→想过渡时振幅收小
@@ -233,7 +233,7 @@ class WaveformModel:
 class WaveformHUDController(NSObject):
     """NSPanel 浮层 + CALayer 渲染。所有方法须主线程调用（用 AppHelper.callAfter）。"""
 
-    def initWithLevelProvider_(self, provider: Callable[[], float]):
+    def initWithLevelProvider_(self, provider: Callable[[], tuple[float, float]]):
         self = objc.super(WaveformHUDController, self).init()
         if self is None:
             return None
@@ -253,9 +253,11 @@ class WaveformHUDController(NSObject):
         m.setStartPoint_(Quartz.CGPointMake(0, 0.5))
         m.setEndPoint_(Quartz.CGPointMake(1, 0.5))
         clear = NSColor.colorWithWhite_alpha_(0.0, 0.0).CGColor()
+        mid = NSColor.colorWithWhite_alpha_(1.0, 0.35).CGColor()
         solid = NSColor.colorWithWhite_alpha_(1.0, 1.0).CGColor()
-        m.setColors_([clear, solid, solid, clear])
-        m.setLocations_([0.0, C.TAPER_RATIO, 1.0 - C.TAPER_RATIO, 1.0])
+        m.setColors_([clear, mid, solid, solid, mid, clear])
+        r = C.TAPER_RATIO
+        m.setLocations_([0.0, r * 0.4, r, 1.0 - r, 1.0 - r * 0.4, 1.0])
         return m
 
     def _build_panel(self) -> None:
@@ -378,7 +380,8 @@ class WaveformHUDController(NSObject):
         now = time.monotonic()
         dt = min(0.05, now - self._last_tick) if self._last_tick else C.FPS
         self._last_tick = now
-        self._model.tick(dt, self._provider())
+        rms, speech_prob = self._provider()
+        self._model.tick(dt, rms, speech_prob)
         state = self._model.render_state()
         Quartz.CATransaction.begin()
         Quartz.CATransaction.setDisableActions_(True)
@@ -445,11 +448,11 @@ def run_demo(seconds: float = 0.0) -> None:
 
     t0 = time.monotonic()
 
-    def fake_level() -> float:
+    def fake_level() -> tuple[float, float]:
         t = time.monotonic() - t0
         # 模拟说话：慢包络 × 快抖动
         env = max(0.0, math.sin(t * 0.9)) ** 1.5
-        return 0.005 + 0.09 * env * (0.6 + 0.4 * math.sin(t * 13.0))
+        return 0.005 + 0.09 * env * (0.6 + 0.4 * math.sin(t * 13.0)), 1.0
 
     hud = WaveformHUDController.alloc().initWithLevelProvider_(fake_level)
     hud.setListening()

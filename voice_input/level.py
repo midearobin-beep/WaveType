@@ -8,8 +8,9 @@ from __future__ import annotations
 import math
 
 # 可调常量
-DB_FLOOR = -60.0      # 噪声门：以下视为静音
+DB_FLOOR = -42.0      # 噪声门：以下视为静音（须高于环境底噪；典型房间底噪 -45~-40dBFS）
 DB_CEIL = -3.0        # 最大视觉振幅
+SQUELCH = 0.12        # 硬门限：归一化电平（压缩前）低于此值直接归零（静默=绝对平线）
 ATTACK_MS = 55.0      # 上升快
 RELEASE_MS = 240.0    # 衰减慢
 COMPRESSION = 0.7     # 非线性压缩指数（<1 = 抬升小声、压缩大声）
@@ -21,16 +22,23 @@ class VoiceLevelProcessor:
         self._level = 0.0
         self._last_t: float | None = None
 
-    def process(self, rms: float, now: float | None = None) -> float:
+    def process(self, rms: float, speech_prob: float = 1.0, now: float | None = None) -> float:
         import time
         now = time.monotonic() if now is None else now
-        # RMS → dBFS → 归一化
-        db = 20.0 * math.log10(max(rms, 1e-9))
-        if db <= DB_FLOOR:
+        # 语音门控（VAD）：非人声的响声（键盘/关门/风扇）不驱动波形。
+        # 门控作用于 target，经 release 平滑后收零，不会硬切。
+        if speech_prob < 0.35:
             target = 0.0
         else:
-            target = min(1.0, (db - DB_FLOOR) / (DB_CEIL - DB_FLOOR))
-            target = target ** COMPRESSION  # 柔和压缩
+            db = 20.0 * math.log10(max(rms, 1e-9))
+            if db <= DB_FLOOR:
+                target = 0.0
+            else:
+                norm = min(1.0, (db - DB_FLOOR) / (DB_CEIL - DB_FLOOR))
+                if norm < SQUELCH:  # 硬门限必须在压缩之前：否则压缩会把底噪抬回可见区
+                    target = 0.0
+                else:
+                    target = norm ** COMPRESSION  # 柔和压缩
         # attack/release 平滑
         if self._last_t is None:
             dt = 0.016

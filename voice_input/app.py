@@ -43,7 +43,10 @@ class VoiceInputApp:
     def __init__(self, config_path: Path) -> None:
         cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         self._cfg = cfg
-        self._recorder = Recorder()
+        vad_model = cfg.get("vad", {}).get("model")
+        if vad_model and not Path(vad_model).is_absolute():
+            vad_model = str(config_path.parent / vad_model)
+        self._recorder = Recorder(vad_model=vad_model)
         self._asr = None  # worker 线程内懒创建（MLX 线程绑定）
         self._polisher = Polisher(**cfg["llm"])
         self._inject_cfg = cfg.get("inject", {})
@@ -143,7 +146,7 @@ class VoiceInputApp:
         if self._hud_enabled:
             from .hud import WaveformHUDController
             self._hud = WaveformHUDController.alloc().initWithLevelProvider_(
-                lambda: self._recorder.level)
+                lambda: (self._recorder.level, self._recorder.speech_prob))
 
         threading.Thread(target=self._hotkey.run, daemon=True).start()
         threading.Thread(target=self._worker, daemon=True).start()
