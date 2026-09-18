@@ -64,8 +64,15 @@ class VoiceInputApp:
         self._last_raw = ""
         self._last_polished = ""
         self._quit = False
-        self._autolearn = AutoLearner(self._memory, self._refresh_dictionary) \
+        self._autolearn = AutoLearner(self._memory, self._on_learned) \
             if cfg.get("autolearn", {}).get("enabled", True) else None
+
+    def _on_learned(self, wrong: str, right: str) -> None:
+        """词条入库后的统一动作：回注词典 + HUD 弹出学习反馈。"""
+        self._refresh_dictionary()
+        if self._hud is not None:
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(self._hud.showLearned_, f"{wrong} → {right}")
 
     # ---- 热键回调（event tap 线程） ----
 
@@ -111,7 +118,7 @@ class VoiceInputApp:
         wrong = extract_wrong(self._last_polished, selected)
         if wrong:
             self._memory.add_correction(wrong, selected)
-            self._refresh_dictionary()
+            self._on_learned(wrong, selected)
             print(f"📖 已学习：{wrong} → {selected}")
         else:
             print(f"ℹ️  选区与最近输出无明显差异，未入库：{selected}")

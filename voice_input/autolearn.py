@@ -117,4 +117,4 @@ class AutoLearner:
                 self._memory.add_correction(wrong, right)
                 log.info("自动学习: %s → %s", wrong, right)
                 print(f"🧠 自动学习：{wrong} → {right}")
-                self._on_learn()
+                self._on_learn(wrong, right)

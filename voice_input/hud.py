@@ -241,6 +241,7 @@ class WaveformHUDController(NSObject):
         self._model = WaveformModel()
         self._last_tick = 0.0
         self._timer = None
+        self._learn_timer = None
         self._build_panel()
         return self
 
@@ -321,15 +322,15 @@ class WaveformHUDController(NSObject):
         view.layer().addSublayer_(self._glow_gradient)
         view.layer().addSublayer_(self._gradient)
 
-        # Listening / Thinking 标签（系统字体，居中于波形上方）
+        # Listening / Thinking / 词条记录 标签（系统字体，居中于波形上方）
         from AppKit import NSFont, NSTextField
         label = NSTextField.labelWithString_("Listening")
         label.setFont_(NSFont.systemFontOfSize_weight_(C.LABEL_FONT_SIZE, 0.23))  # medium
         label.setTextColor_(NSColor.colorWithWhite_alpha_(1.0, 0.72))
         label.setAlignment_(1)  # center
-        lw = 120.0
-        label.setFrame_(Quartz.CGRectMake(
-            (C.HUD_WIDTH - lw) / 2.0, C.HUD_HEIGHT - 20.0, lw, 15.0))
+        label.setLineBreakMode_(4)  # truncate tail
+        lw = C.HUD_WIDTH - 40.0
+        label.setFrame_(Quartz.CGRectMake(20.0, C.HUD_HEIGHT - 20.0, lw, 15.0))
         view.addSubview_(label)
         self._label = label
 
@@ -372,6 +373,24 @@ class WaveformHUDController(NSObject):
         self._model.set_state("thinking")
         self._label.setStringValue_("Thinking")
         self.show()  # 幂等：确保面板可见且 timer 在跑
+
+    # ---------- 词条学习反馈 ----------
+
+    def showLearned_(self, entry: str) -> None:
+        """词条已记录：波形以 Thinking 视觉重现，2.6s 后自动收拢。"""
+        self._label.setStringValue_(f'"{entry}" saved to dictionary')
+        self._model.set_state("thinking")
+        self.show()
+        if self._learn_timer is not None:
+            self._learn_timer.invalidate()
+        self._learn_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            2.6, self, "autoHideLearned:", None, False)
+
+    def autoHideLearned_(self, timer) -> None:
+        self._learn_timer = None
+        # 仅当仍处于词条提示状态才收拢（用户可能已开始新的听写）
+        if self._model.state == "thinking":
+            self.hide()
 
     # ---------- 帧循环 ----------
 
@@ -430,10 +449,17 @@ class WaveformHUDController(NSObject):
         NSApp.terminate_(None)
 
     def demoFlip_(self, timer) -> None:
-        """demo 用：每 5 秒在 Listening / Thinking 间切换，便于调两种动画。"""
+        """demo 用：Listening → Thinking → 词条记录反馈 三态循环，便于调动画。"""
         if self._model.state == "listening":
             self.setThinking()
         else:
+            self.showLearned_("teh → the")
+            # showLearned_ 自带 2.6s 自动收拢；收拢后回到 listening 继续循环
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                3.2, self, "demoResumeListening:", None, False)
+
+    def demoResumeListening_(self, timer) -> None:
+        if self._model.state == "thinking":
             self.setListening()
 
 
