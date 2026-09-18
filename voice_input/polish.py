@@ -71,9 +71,14 @@ class Polisher:
         )
         out = (resp.message.content or "").strip()
         log.info("润色: %s → %s", text, out)
-        # 兜底：小模型偶发丢内容/复读/膨胀，异常则回退原文
-        if not out or len(out) < len(text) * 0.5 or len(out) > len(text) * 1.6:
-            log.warning("润色结果异常（长度），回退 ASR 原文")
+        # 兜底：小模型偶发丢内容/复读/膨胀，异常则回退原文。
+        # 长度阈值分档：长段口语本来就该大幅压缩（去口癖+重组），
+        # 固定 0.5 下限会把正常的长文本清洗误判为"丢内容"而回退原文。
+        n = len(text)
+        min_ratio = 0.5 if n < 100 else (0.35 if n < 300 else 0.25)
+        if not out or len(out) < n * min_ratio or len(out) > n * 1.6:
+            log.warning("润色结果异常（长度 %d→%d，阈值 %.2f），回退 ASR 原文",
+                        n, len(out), min_ratio)
             return text
         if _has_repetition_loop(out):
             log.warning("润色结果异常（复读），回退 ASR 原文")
