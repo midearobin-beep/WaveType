@@ -326,7 +326,8 @@ class WaveformHUDController(NSObject):
         from AppKit import NSFont, NSTextField
         label = NSTextField.labelWithString_("Listening")
         label.setFont_(NSFont.systemFontOfSize_weight_(C.LABEL_FONT_SIZE, 0.23))  # medium
-        label.setTextColor_(NSColor.colorWithWhite_alpha_(1.0, 0.72))
+        # 中性灰：白底/深色底都可读（纯白在白底上不可见；不加背景块，保持无容器感）
+        label.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.42, 0.85))
         label.setAlignment_(1)  # center
         label.setLineBreakMode_(4)  # truncate tail
         lw = C.HUD_WIDTH - 40.0
