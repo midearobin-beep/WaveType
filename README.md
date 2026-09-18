@@ -6,6 +6,8 @@
 > Press `Fn`, speak, press `Fn` again — polished text types itself into any app.
 > No cloud. No subscription. Your voice never leaves your Mac.
 
+![WaveType demo](assets/demo.gif)
+
 ## ✨ Features
 
 - **Push-to-talk dictation** — tap `Fn` to start, tap again to finish; text is typed character-by-character via `CGEvent` Unicode injection (no clipboard, no IME interference, works in any app)
