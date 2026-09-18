@@ -1,0 +1,30 @@
+# 本配置文件不上库（.gitignore）。复制 config.example.yaml 为 config.yaml 后按需修改。
+asr:
+  # HF repo id（首次自动下载）或本地模型目录路径（~ 会自动展开）
+  model: mlx-community/Qwen3-ASR-1.7B-8bit
+  # 更省内存的备选：mlx-community/Qwen3-ASR-1.7B-5bit / Qwen3-ASR-0.6B-5bit
+  language: auto          # auto / Chinese / English ...（中英混说保持 auto）
+  context: ""             # ASR 热词（个人词典会自动注入，一般留空）
+
+llm:
+  model: qwen3.5:4b-mlx   # Ollama 本地小模型，速度优先
+  think: false            # 关闭思考
+  enabled: true           # false = 直通 ASR 原文（--raw 等效）
+  base_url: http://127.0.0.1:11434
+
+inject:
+  chars_per_second: 60    # 逐字打字速度（非流式：模型处理完一次性打出）
+  initial_delay_ms: 50    # 注入前等待，确保目标输入框焦点稳定
+
+hotkey:
+  key: fn                 # fn
+  mode: toggle            # toggle=按一下开始、再按一下结束（然后开始 Thinking 处理）
+  # 纠错手势：选中你改正后的文本，按住 Ctrl 点按 Fn → 学习纠错对
+
+memory:
+  db: data/memory.db      # SQLite：词典 + 历史
+  max_hotwords: 80        # 注入 ASR 的热词上限
+
+hud:
+  enabled: true           # Fn 按下时屏幕下方显示波形浮层
+  # 视觉参数（宽度/高度/颜色速度/attack/release 等）在 voice_input/hud.py 的 C 类中调整

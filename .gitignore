@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 本地配置与数据（不上库）
+config.yaml
+data/
+*.db
+
+# 工作区与文档草稿
+.workbuddy/
+语音输入波形图waveform HUD需求.md
+
+# macOS
+.DS_Store
