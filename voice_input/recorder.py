@@ -22,6 +22,7 @@ class Recorder:
         self._recording = False
         self.level = 0.0        # 实时 RMS（回调线程写，HUD 线程读；float 读写原子够用）
         self.speech_prob = 1.0  # 语音概率（无 VAD 时恒 1.0，退化为能量门）
+        self.max_speech_prob = 0.0  # 本次录音期间的峰值语音概率（防伪触发幻觉）
         self._vad = None
         if vad_model:
             from .vad import create_vad
@@ -36,6 +37,9 @@ class Recorder:
             if self._recording:
                 return
             self._frames = []
+            self.max_speech_prob = 0.0
+            if self._vad is not None:
+                self._vad.reset()
             self._stream = sd.InputStream(
                 samplerate=SAMPLE_RATE, channels=1, dtype="float32",
                 callback=self._cb, blocksize=1024,
@@ -66,6 +70,8 @@ class Recorder:
         if self._vad is not None:
             self._vad.feed(block.reshape(-1))
             self.speech_prob = self._vad.prob
+            if self._vad.prob > self.max_speech_prob:
+                self.max_speech_prob = self._vad.prob
 
 
 def save_wav(audio: np.ndarray, path: Path) -> Path:

@@ -74,11 +74,28 @@ class VoiceInputApp:
 
     def _on_release(self) -> None:
         audio = self._recorder.stop()
+        max_speech = self._recorder.max_speech_prob
+        # 防幻觉两道防线（热词偏置下，静音/噪音会被 ASR 幻觉成词典词）：
+        # ① 录音太短（误触）② VAD 全程没检测到人声 —— 直接收拢 HUD，不进 Thinking
+        duration = len(audio) / 16000
+        if len(audio) and duration < 0.5:
+            log.info("丢弃：录音过短 (%.2fs)", duration)
+            self._hide_hud()
+            return
+        if len(audio) and self._recorder._vad is not None and max_speech < 0.4:
+            log.info("丢弃：未检测到人声（max prob %.2f）", max_speech)
+            self._hide_hud()
+            return
         if self._hud is not None:
             from PyObjCTools import AppHelper
             AppHelper.callAfter(self._hud.setThinking)  # 录音结束→模型处理中
         if len(audio):
             self._queue.put(audio)
+
+    def _hide_hud(self) -> None:
+        if self._hud is not None:
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(self._hud.hide)
 
     def _on_correct(self) -> None:
         """Ctrl+Fn：用户已手动改正并选中正确文本 → 学纠错对。"""
