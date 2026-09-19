@@ -5,6 +5,7 @@ __pycache__/
 
 # 本地配置与数据（不上库）
 config.yaml
+.env
 data/
 *.db
 
