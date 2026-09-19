@@ -7,10 +7,21 @@ asr:
   context: ""             # ASR 热词（个人词典会自动注入，一般留空）
 
 llm:
-  model: qwen3.5:4b-mlx   # Ollama 本地小模型，速度优先
-  think: false            # 关闭思考
+  # 二选一：
+  # ① 云端 OpenAI 兼容接口（推荐：不吃内存、无冷启动；文本会上行，音频始终不出本机）
+  provider: openai
+  base_url: https://api.deepseek.com
+  model: deepseek-flash
+  api_key_env: DEEPSEEK_API_KEY   # 密钥写在项目根目录 .env：DEEPSEEK_API_KEY=sk-xxx
+  disable_thinking: true          # 关闭思维链（DeepSeek v4 默认开启，短文本润色用不上）
+  timeout: 20
+  # ② 本地 Ollama（离线零成本，但 4B 模型约占 4GB 内存，且闲置 5 分钟卸载后再用需重新加载）
+  # provider: ollama
+  # base_url: http://127.0.0.1:11434
+  # model: qwen3.5:4b-mlx
+  # think: false                  # 关闭思考
+  # keep_alive: 30m               # 延长驻留，避免闲置后首句等 30s
   enabled: true           # false = 直通 ASR 原文（--raw 等效）
-  base_url: http://127.0.0.1:11434
 
 inject:
   chars_per_second: 60    # 逐字打字速度（非流式：模型处理完一次性打出）
