@@ -179,14 +179,14 @@ class VoiceInputApp:
             return
 
         if mode == "translate":
-            final = self._polisher.translate(text)
+            final = self._polisher.translate(text, app=app)
             type_text(final, **self._inject_cfg)
             self._memory.log_history(f"[翻译] {text}", final, app)
             self._hide_hud()
             return
 
         if mode == "ask":
-            action, content = self._polisher.ask(text, context)
+            action, content = self._polisher.ask(text, context, app=app)
             if action == "edit" and context:
                 # 编辑指令：选区仍在焦点应用里保持选中，直接打字即整体替换
                 type_text(content, **self._inject_cfg)
@@ -204,7 +204,7 @@ class VoiceInputApp:
             return
 
         # dictate：ASR → 润色 → 上屏
-        final = self._polisher.polish(text)
+        final = self._polisher.polish(text, app=app)
         if not final:
             # 润色层判定"无实义内容"（整句都是口水词）：不上屏、不入历史
             self._hide_hud()

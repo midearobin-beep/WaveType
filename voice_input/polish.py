@@ -74,6 +74,18 @@ SYSTEM_PROMPT = """你在把用户的语音转写原文整理成可直接上屏�
 
 DICT_TEMPLATE = "\n用户个人词典（以下写法必须严格遵守，左边是常被误识别的形式）：\n%s\n"
 
+# 前台 App 语境：同一句话在邮件和微信里的理想语气不同（Typeless 的
+# per-app 适配的核心信号）。按应用类别微调，不认识的 App 不改变行为。
+APP_CONTEXT_TEMPLATE = """
+当前输入目标应用：{app}。据此微调语气和格式：
+- 邮件/文档类（Outlook、Mail、Word、Pages、飞书文档）：商务书面，句子完整，称呼落款自然
+- 聊天类（微信、企业微信、QQ、Telegram、钉钉）：自然随意，允许短句，不强行书面化
+- 备忘录/笔记类（备忘录、Notes、Obsidian、Bear）：简洁直接，条目感优先
+- 代码/终端类（Terminal、iTerm、VS Code、Xcode）：只做最小修正，技术内容原样保留，
+  不重排、不改写命令和代码
+- 浏览器/其他：中性处理，同默认规则
+"""
+
 TRANSLATE_PROMPT = """你是中英互译引擎。把 <转写原文> 标签里的口述内容翻译成另一种语言。
 
 规则：
@@ -173,7 +185,18 @@ class Polisher:
         """注入个人词典纠错映射 [(错误形式, 正确形式)]。"""
         self._mappings = mappings
 
-    def polish(self, text: str) -> str:
+    def _system(self, base: str, app: str | None = None,
+                dict_template: str = DICT_TEMPLATE) -> str:
+        """组装 system prompt：基础规则 + 词典约束 + 前台 App 语境。"""
+        parts = [base]
+        if self._mappings:
+            pairs = "\n".join(f"{w} → {r}" for w, r in self._mappings)
+            parts.append(dict_template % pairs)
+        if app:
+            parts.append(APP_CONTEXT_TEMPLATE.format(app=app))
+        return "".join(parts)
+
+    def polish(self, text: str, app: str | None = None) -> str:
         """返回上屏文本；返回空串表示"这句话没有内容，不要上屏"。"""
         if not self.enabled or not text.strip():
             return text
@@ -182,10 +205,7 @@ class Polisher:
         if _meaningful_len(text) == 0:
             log.info("丢弃：无实义内容（%s）", text)
             return ""
-        system = SYSTEM_PROMPT
-        if self._mappings:
-            pairs = "\n".join(f"{w} → {r}" for w, r in self._mappings)
-            system += DICT_TEMPLATE % pairs
+        system = self._system(SYSTEM_PROMPT, app)
         try:
             out = self._complete(system, _wrap(text), max_tokens=self._cap(text))
         except Exception as e:  # 网络/配额/服务异常：绝不阻塞上屏，回退原文
@@ -207,14 +227,11 @@ class Polisher:
             return text
         return out
 
-    def translate(self, text: str) -> str:
+    def translate(self, text: str, app: str | None = None) -> str:
         """中英自动互译：原文中文 → 英文，原文英文 → 中文。失败回退原文。"""
         if not self.enabled or not text.strip():
             return text
-        system = TRANSLATE_PROMPT
-        if self._mappings:
-            pairs = "\n".join(f"{w} → {r}" for w, r in self._mappings)
-            system += DICT_TEMPLATE % pairs
+        system = self._system(TRANSLATE_PROMPT, app)
         try:
             out = self._complete(system, _wrap(text), max_tokens=self._cap(text))
         except Exception as e:
@@ -228,7 +245,8 @@ class Polisher:
             return text
         return out
 
-    def ask(self, question: str, context: str | None = None) -> tuple[str, str]:
+    def ask(self, question: str, context: str | None = None,
+            app: str | None = None) -> tuple[str, str]:
         """语音问答/编辑。返回 (action, content)：action ∈ "answer" | "edit"。
 
         - 有选区且指令是编辑要求 → ("edit", 改写后的完整文本)，由调用方替换选区
@@ -238,10 +256,7 @@ class Polisher:
         user = f"<指令>\n{_strip_tags(question)}\n</指令>"
         if context:
             user += f"\n<选中文本>\n{_strip_tags(context)}\n</选中文本>"
-        system = ASK_PROMPT
-        if self._mappings:
-            pairs = "\n".join(f"{w} → {r}" for w, r in self._mappings)
-            system += ASK_DICT_TEMPLATE % pairs
+        system = self._system(ASK_PROMPT, app, ASK_DICT_TEMPLATE)
         try:
             out = self._complete(system, user, temperature=0.3,
                                  max_tokens=self._cap(question, floor=256))
