@@ -155,6 +155,10 @@ class VoiceInputApp:
                 AppHelper.callAfter(self._hud.hide)
             return
         final = self._polisher.polish(text)
+        if not final:
+            # 润色层判定"无实义内容"（整句都是口水词）：不上屏、不入历史
+            self._hide_hud()
+            return
         type_text(final, **self._inject_cfg)
         self._last_raw, self._last_polished = text, final
         self._memory.log_history(text, final, app)

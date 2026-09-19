@@ -49,6 +49,7 @@ class FnHotkey:
         if event_type == Quartz.kCGEventFlagsChanged:
             flags = Quartz.CGEventGetFlags(event)
             down = bool(flags & _FN_FLAG)
+            log.debug("flagsChanged flags=%#x down=%s", flags, down)
             if down != self._down:
                 self._down = down
                 self._dispatch(down, ctrl=bool(flags & _CTRL_FLAG))
