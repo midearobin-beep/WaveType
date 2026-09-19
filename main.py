@@ -38,6 +38,7 @@ def main() -> None:
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--demo", action="store_true", help="HUD 演示模式：模拟电平，不用说话")
     ap.add_argument("--demo-secs", type=float, default=0, help="demo 自动退出秒数")
+    ap.add_argument("--setup", action="store_true", help="打开首次运行设置向导（GUI）")
     sub = ap.add_subparsers(dest="cmd")
     d = sub.add_parser("dict", help="词典管理")
     d.add_argument("action", nargs="?", default="list", choices=["list", "add", "del"])
@@ -56,6 +57,11 @@ def main() -> None:
                             format="%(asctime)s %(levelname)s %(name)s: %(message)s")
         from voice_input.hud import run_demo
         run_demo(seconds=args.demo_secs)
+        return
+
+    if args.setup:
+        import setup_wizard
+        setup_wizard.run()
         return
 
     logging.basicConfig(
