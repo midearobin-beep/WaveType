@@ -58,9 +58,17 @@ class VoiceInputApp:
         self._hud_enabled = cfg.get("hud", {}).get("enabled", True)
         self._hud = None
         self._queue: queue.Queue = queue.Queue()
+        modes_cfg = cfg.get("modes", {})
         self._hotkey = FnHotkey(self._on_press, self._on_release,
                                 mode=cfg.get("hotkey", {}).get("mode", "hold"),
-                                on_correct=self._on_correct)
+                                on_correct=self._on_correct,
+                                on_cancel=self._on_cancel,
+                                translate_enabled=modes_cfg.get("translate", True),
+                                ask_enabled=modes_cfg.get("ask", True))
+        self._mode = "dictate"          # 当前录音模式
+        self._ask_context = None        # Ask 进场时捕获的选区文本
+        self._ask_card_secs = cfg.get("ask_card_secs", 12)
+        self._card = None
         self._last_raw = ""
         self._last_polished = ""
         self._quit = False
@@ -76,16 +84,24 @@ class VoiceInputApp:
 
     # ---- 热键回调（event tap 线程） ----
 
-    def _on_press(self) -> None:
+    _MODE_LABEL = {"dictate": "Listening", "translate": "Translating", "ask": "Ask"}
+
+    def _on_press(self, mode: str = "dictate") -> None:
+        self._mode = mode
+        # Ask：进场时即捕获选区（编辑指令要替换的就是这段文本）。
+        # 趁焦点还在目标应用、选区完整时读取，收尾时直接用。
+        self._ask_context = read_selected_text() if mode == "ask" else None
         if self._autolearn is not None:
             self._autolearn.stop()  # 开始新一次听写，停止监视上一段
         self._recorder.start()
         if self._hud is not None:
             from PyObjCTools import AppHelper
-            AppHelper.callAfter(self._hud.setListening)
+            AppHelper.callAfter(self._hud.setListeningLabel_,
+                                self._MODE_LABEL.get(mode, "Listening"))
 
-    def _on_release(self) -> None:
+    def _on_release(self, mode: str = "dictate") -> None:
         audio = self._recorder.stop()
+        context, self._ask_context = self._ask_context, None
         max_speech = self._recorder.max_speech_prob
         # 防幻觉两道防线（热词偏置下，静音/噪音会被 ASR 幻觉成词典词）：
         # ① 录音太短（误触）② VAD 全程没检测到人声 —— 直接收拢 HUD，不进 Thinking
@@ -102,7 +118,13 @@ class VoiceInputApp:
             from PyObjCTools import AppHelper
             AppHelper.callAfter(self._hud.setThinking)  # 录音结束→模型处理中
         if len(audio):
-            self._queue.put(audio)
+            self._queue.put((audio, mode, context))
+
+    def _on_cancel(self) -> None:
+        """Fn 先落的 Fn+Shift chord：口述刚启动即作废，改走翻译。"""
+        self._recorder.stop()  # 丢弃这段刚开始的录音
+        self._ask_context = None
+        log.info("口述已取消（升级为翻译模式）")
 
     def _hide_hud(self) -> None:
         if self._hud is not None:
@@ -127,13 +149,13 @@ class VoiceInputApp:
 
     def _worker(self) -> None:
         while True:
-            audio = self._queue.get()
+            audio, mode, context = self._queue.get()
             try:
                 if self._asr is None:
                     from .asr import ASR
                     self._asr = ASR(**self._cfg["asr"])
                     self._refresh_dictionary()
-                self._process(audio)
+                self._process(audio, mode, context)
             except Exception:
                 log.exception("处理失败")
 
@@ -146,14 +168,39 @@ class VoiceInputApp:
         self._polisher.set_dictionary(self._memory.mappings())
         log.info("词典已回注（热词 %d 字）", len(hw))
 
-    def _process(self, audio) -> None:
+    def _process(self, audio, mode: str = "dictate", context: str | None = None) -> None:
         app = _frontmost_app()
         text = self._asr.transcribe(audio)
         if not text:
-            if self._hud is not None:
-                from PyObjCTools import AppHelper
-                AppHelper.callAfter(self._hud.hide)
+            self._hide_hud()
             return
+
+        if mode == "translate":
+            final = self._polisher.translate(text)
+            type_text(final, **self._inject_cfg)
+            self._memory.log_history(f"[翻译] {text}", final, app)
+            self._hide_hud()
+            return
+
+        if mode == "ask":
+            action, content = self._polisher.ask(text, context)
+            if action == "edit" and context:
+                # 编辑指令：选区仍在焦点应用里保持选中，直接打字即整体替换
+                type_text(content, **self._inject_cfg)
+                self._memory.log_history(f"[改写] {text}", content, app)
+                self._hide_hud()
+            elif content:
+                # 问答：答案进卡片，不动用户文本
+                self._memory.log_history(f"[问答] {text}", content, app)
+                self._hide_hud()
+                self._show_card(content, title="Ask")
+            else:
+                self._memory.log_history(f"[问答] {text}", "(调用失败)", app)
+                self._hide_hud()
+                self._show_card("云端服务暂时不可用，请稍后再试。", title="Ask")
+            return
+
+        # dictate：ASR → 润色 → 上屏
         final = self._polisher.polish(text)
         if not final:
             # 润色层判定"无实义内容"（整句都是口水词）：不上屏、不入历史
@@ -164,9 +211,14 @@ class VoiceInputApp:
         self._memory.log_history(text, final, app)
         if self._autolearn is not None:
             self._autolearn.watch(final)  # Typeless 式：监视用户改动，自动入库
-        if self._hud is not None:
-            from PyObjCTools import AppHelper
-            AppHelper.callAfter(self._hud.hide)  # 上屏完成 → 波形收拢消失
+        self._hide_hud()
+
+    def _show_card(self, text: str, title: str = "Ask") -> None:
+        """主线程展示答案卡片。"""
+        if self._card is None:
+            return
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(lambda: self._card.showAnswer_withTitle_(text, title))
 
     # ---- 主线程：NSApp ----
 
@@ -179,9 +231,11 @@ class VoiceInputApp:
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
         if self._hud_enabled:
-            from .hud import WaveformHUDController
+            from .hud import AnswerCardController, WaveformHUDController
             self._hud = WaveformHUDController.alloc().initWithLevelProvider_(
                 lambda: (self._recorder.level, self._recorder.speech_prob))
+            self._card = AnswerCardController.alloc().initWithTimeout_(
+                float(self._ask_card_secs))
 
         threading.Thread(target=self._hotkey.run, daemon=True).start()
         threading.Thread(target=self._worker, daemon=True).start()
@@ -196,5 +250,9 @@ class VoiceInputApp:
             AppHelper.callAfter(0.4, _poll_quit)
 
         _poll_quit()
-        print("🎙️  语音输入已启动：按住 Fn 说话，松开自动上屏；Ctrl+Fn 纠错学习；Ctrl+C 退出")
+        print("🎙️  语音输入已启动：")
+        print("    Fn          口述（按住说话 / 再按收尾）")
+        print("    Fn + Shift  中英互译（点按进场，Fn 收尾）")
+        print("    Fn + Space  语音问答（选中文本时可语音编辑）")
+        print("    Ctrl + Fn   纠错学习 · Ctrl+C 退出")
         AppHelper.runEventLoop()

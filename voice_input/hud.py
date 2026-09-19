@@ -370,6 +370,12 @@ class WaveformHUDController(NSObject):
         self._label.setStringValue_("Listening")
         self.show()
 
+    def setListeningLabel_(self, label: str) -> None:
+        """分模式监听标签：Listening / Translating / Ask。"""
+        self._model.set_state("listening")
+        self._label.setStringValue_(label)
+        self.show()
+
     def setThinking(self) -> None:
         self._model.set_state("thinking")
         self._label.setStringValue_("Thinking")
@@ -462,6 +468,145 @@ class WaveformHUDController(NSObject):
     def demoResumeListening_(self, timer) -> None:
         if self._model.state == "thinking":
             self.setListening()
+
+
+class AnswerCardController(NSObject):
+    """Ask 模式的答案卡片：屏幕中上部浮动面板，展示回答，可复制，超时自动收拢。
+
+    与波形 HUD 不同，卡片需要交互（复制/关闭），因此不忽略鼠标事件，
+    但仍是 NonactivatingPanel —— 不抢焦点，不影响用户正在输入的应用。
+    """
+
+    CARD_WIDTH = 460.0
+    TEXT_WIDTH = CARD_WIDTH - 40.0
+    MAX_HEIGHT = 380.0
+
+    def initWithTimeout_(self, timeout: float):
+        self = objc.super(AnswerCardController, self).init()
+        if self is None:
+            return None
+        self._timeout = timeout
+        self._hide_timer = None
+        self._build()
+        return self
+
+    def _build(self) -> None:
+        from AppKit import NSButton, NSFont, NSScrollView, NSTextField, NSTextView
+
+        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            Quartz.CGRectMake(0, 0, self.CARD_WIDTH, 200),
+            NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
+            NSBackingStoreBuffered, False,
+        )
+        panel.setLevel_(NSStatusWindowLevel)
+        panel.setOpaque_(False)
+        panel.setBackgroundColor_(NSColor.clearColor())
+        panel.setHasShadow_(True)
+        panel.setCollectionBehavior_(
+            NSWindowCollectionBehaviorCanJoinAllSpaces
+            | NSWindowCollectionBehaviorStationary
+        )
+
+        bg = NSView.alloc().initWithFrame_(Quartz.CGRectMake(0, 0, self.CARD_WIDTH, 200))
+        bg.setWantsLayer_(True)
+        bg.layer().setCornerRadius_(12.0)
+        bg.layer().setBackgroundColor_(
+            NSColor.colorWithCalibratedWhite_alpha_(0.11, 0.94).CGColor())
+
+        # 标题
+        title = NSTextField.labelWithString_("Ask")
+        title.setFont_(NSFont.systemFontOfSize_weight_(11.0, 0.23))
+        title.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.75, 1.0))
+        self._title = title
+        bg.addSubview_(title)
+
+        # 关闭按钮
+        close = NSButton.alloc().initWithFrame_(Quartz.CGRectMake(0, 0, 22, 22))
+        close.setTitle_("✕")
+        close.setBordered_(False)
+        close.setContentTintColor_(NSColor.colorWithCalibratedWhite_alpha_(0.6, 1.0))
+        close.setTarget_(self)
+        close.setAction_("closeCard:")
+        self._close = close
+        bg.addSubview_(close)
+
+        # 正文（可选中，超长可滚动）
+        scroll = NSScrollView.alloc().initWithFrame_(Quartz.CGRectMake(20, 44, self.TEXT_WIDTH, 120))
+        scroll.setHasVerticalScroller_(True)
+        scroll.setDrawsBackground_(False)
+        text = NSTextView.alloc().initWithFrame_(Quartz.CGRectMake(0, 0, self.TEXT_WIDTH, 120))
+        text.setEditable_(False)
+        text.setSelectable_(True)
+        text.setDrawsBackground_(False)
+        text.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.92, 1.0))
+        text.setFont_(NSFont.systemFontOfSize_(13.0))
+        scroll.setDocumentView_(text)
+        self._scroll = scroll
+        self._text = text
+        bg.addSubview_(scroll)
+
+        # 复制按钮
+        copy = NSButton.alloc().initWithFrame_(Quartz.CGRectMake(0, 0, 60, 22))
+        copy.setTitle_("复制")
+        copy.setFont_(NSFont.systemFontOfSize_(11.0))
+        copy.setBezelStyle_(1)  # rounded
+        copy.setTarget_(self)
+        copy.setAction_("copyAnswer:")
+        self._copy = copy
+        bg.addSubview_(copy)
+
+        panel.setContentView_(bg)
+        self._panel = panel
+        self._bg = bg
+
+    # ---------- 对外（主线程） ----------
+
+    def showAnswer_withTitle_(self, answer: str, title: str = "Ask") -> None:
+        from AppKit import NSFont, NSFontAttributeName
+        from Foundation import NSString
+        # 用 NSString 精确测量多行文本高度
+        font = NSFont.systemFontOfSize_(13.0)
+        rect = NSString.stringWithString_(answer).boundingRectWithSize_options_attributes_(
+            Quartz.CGSizeMake(self.TEXT_WIDTH, 10000),
+            1,  # NSStringDrawingUsesLineFragmentOrigin
+            {NSFontAttributeName: font},
+        )
+        text_h = min(rect.size.height + 8.0, self.MAX_HEIGHT - 96.0)
+        card_h = text_h + 96.0  # 标题 28 + 正文 + 底部按钮区 40 + 边距
+
+        screen = NSScreen.mainScreen().visibleFrame()
+        x = screen.origin.x + (screen.size.width - self.CARD_WIDTH) / 2.0
+        y = screen.origin.y + screen.size.height * 0.62 - card_h / 2.0
+        self._panel.setFrame_display_(Quartz.CGRectMake(x, y, self.CARD_WIDTH, card_h), True)
+        self._bg.setFrame_(Quartz.CGRectMake(0, 0, self.CARD_WIDTH, card_h))
+
+        self._title.setFrame_(Quartz.CGRectMake(20, card_h - 26, 200, 16))
+        self._title.setStringValue_(title)
+        self._close.setFrame_(Quartz.CGRectMake(self.CARD_WIDTH - 34, card_h - 30, 22, 22))
+        self._scroll.setFrame_(Quartz.CGRectMake(20, 44, self.TEXT_WIDTH, text_h))
+        self._text.setString_(answer)
+        self._text.setFrame_(Quartz.CGRectMake(0, 0, self.TEXT_WIDTH, max(text_h, rect.size.height + 8)))
+        self._copy.setFrame_(Quartz.CGRectMake(self.CARD_WIDTH - 80, 12, 60, 22))
+        self._copy.setTitle_("复制")
+
+        self._panel.orderFrontRegardless()
+        if self._hide_timer is not None:
+            self._hide_timer.invalidate()
+        self._hide_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            self._timeout, self, "closeCard:", None, False)
+
+    def copyAnswer_(self, sender) -> None:
+        from AppKit import NSPasteboard
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(self._text.string(), "public.plain-text")
+        self._copy.setTitle_("已复制")
+
+    def closeCard_(self, sender) -> None:
+        if self._hide_timer is not None:
+            self._hide_timer.invalidate()
+            self._hide_timer = None
+        self._panel.orderOut_(None)
 
 
 def run_demo(seconds: float = 0.0) -> None:

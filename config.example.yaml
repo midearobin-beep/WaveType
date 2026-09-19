@@ -32,6 +32,11 @@ hotkey:
   mode: toggle            # toggle=按一下开始、再按一下结束（然后开始 Thinking 处理）
   # 纠错手势：选中你改正后的文本，按住 Ctrl 点按 Fn → 学习纠错对
 
+modes:
+  translate: true         # Fn+Shift 中英自动互译（说中文出英文，说英文出中文）
+  ask: true               # Fn+Space 语音问答；选中文本后可语音编辑（"把这段改成…"）
+ask_card_secs: 12         # Ask 答案卡片自动收起时间（秒）
+
 memory:
   db: data/memory.db      # SQLite：词典 + 历史
   max_hotwords: 80        # 注入 ASR 的热词上限
