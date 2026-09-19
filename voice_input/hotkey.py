@@ -21,6 +21,8 @@ Fn 在 macOS 上不是普通按键，走 flagsChanged 事件，
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from collections.abc import Callable
 
@@ -65,6 +67,19 @@ class FnHotkey:
         self._active_since = 0.0           # 当前模式启动时刻（chord 纠错窗口用）
         self._space_swallowed = False      # Fn+Space 的 keyUp 也要一并吞掉
         self._loop = None
+        # 回调工作队列：tap 回调里只入队不干活。录音启动、选区读取（含 0.15s
+        # 剪贴板兜底）都是毫秒~百毫秒级阻塞，直接在 tap 线程跑会被系统判定
+        # 超时并禁用 tap（实测已发生），期间按键丢失。
+        self._events: queue.Queue = queue.Queue()
+        threading.Thread(target=self._event_loop, daemon=True).start()
+
+    def _event_loop(self) -> None:
+        while True:
+            fn, args = self._events.get()
+            try:
+                fn(*args)
+            except Exception:
+                log.exception("热键回调异常")
 
     # ---------- 事件回调 ----------
 
@@ -90,6 +105,13 @@ class FnHotkey:
         if event_type == Quartz.kCGEventKeyDown:
             flags = Quartz.CGEventGetFlags(event)
             if self._ask_enabled and (flags & _FN_FLAG):
+                # Fn+Space 的正常手法是先按住 Fn 再敲 Space：Fn 落下沿会先把
+                # 口述启动，Space 晚几十~几百毫秒才到——与 Fn+Shift 一样做
+                # chord 纠错：在宽限窗口内取消口述、升级为 Ask。
+                if (self._active == "dictate"
+                        and time.monotonic() - self._active_since < _CHORD_GRACE_S):
+                    log.debug("Fn+Space（Fn 先落）→ 取消口述改走 ask")
+                    self._cancel_dictate()
                 log.debug("Fn+Space → ask")
                 self._space_swallowed = True
                 self._start("ask")
@@ -158,12 +180,9 @@ class FnHotkey:
         if self._on_cancel is not None:
             self._safe_call(self._on_cancel)
 
-    @staticmethod
-    def _safe_call(fn, *args) -> None:
-        try:
-            fn(*args)
-        except Exception:
-            log.exception("热键回调异常")
+    def _safe_call(self, fn, *args) -> None:
+        """回调一律走工作队列，tap 线程即刻返回（防超时禁用）。"""
+        self._events.put((fn, args))
 
     # ---------- tap 生命周期 ----------
 

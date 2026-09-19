@@ -172,6 +172,9 @@ class VoiceInputApp:
         app = _frontmost_app()
         text = self._asr.transcribe(audio)
         if not text:
+            # VAD 听到了声音但 ASR 转写为空（说得太轻/太晚/纯噪音）：
+            # 必须留日志——静默丢弃会让排障无从下手
+            log.info("丢弃：ASR 空结果（%s，%.1fs）", mode, len(audio) / 16000)
             self._hide_hud()
             return
 
