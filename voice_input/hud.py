@@ -381,6 +381,12 @@ class WaveformHUDController(NSObject):
         self._label.setStringValue_("Thinking")
         self.show()  # 幂等：确保面板可见且 timer 在跑
 
+    def setThinkingLabel_(self, label: str) -> None:
+        """Thinking 动画 + 自定义阶段标签：Transcribing / Polishing / Translating / Asking。"""
+        self._model.set_state("thinking")
+        self._label.setStringValue_(label)
+        self.show()
+
     # ---------- 词条学习反馈 ----------
 
     def showLearned_(self, entry: str) -> None:

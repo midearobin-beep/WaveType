@@ -155,6 +155,12 @@ class VoiceInputApp:
                     from .asr import ASR
                     self._asr = ASR(**self._cfg["asr"])
                     self._refresh_dictionary()
+                if mode == "_warmup":
+                    # 启动预热：一小段静音过一遍转写，让 MLX 完成编译与缓存，
+                    # 首次真实听写不再付 2~8s 的加载+冷推理成本
+                    self._asr.transcribe(audio)
+                    log.info("ASR 预热完成")
+                    continue
                 self._process(audio, mode, context)
             except Exception:
                 log.exception("处理失败")
@@ -168,8 +174,11 @@ class VoiceInputApp:
         self._polisher.set_dictionary(self._memory.mappings())
         log.info("词典已回注（热词 %d 字）", len(hw))
 
+    _STAGE_LABEL = {"dictate": "Polishing", "translate": "Translating", "ask": "Asking"}
+
     def _process(self, audio, mode: str = "dictate", context: str | None = None) -> None:
         app = _frontmost_app()
+        self._stage_label("Transcribing")  # ASR 阶段（首次含模型加载）
         text = self._asr.transcribe(audio)
         if not text:
             # VAD 听到了声音但 ASR 转写为空（说得太轻/太晚/纯噪音）：
@@ -177,6 +186,7 @@ class VoiceInputApp:
             log.info("丢弃：ASR 空结果（%s，%.1fs）", mode, len(audio) / 16000)
             self._hide_hud()
             return
+        self._stage_label(self._STAGE_LABEL.get(mode, "Polishing"))  # LLM 阶段
 
         if mode == "translate":
             final = self._polisher.translate(text, app=app)
@@ -223,6 +233,12 @@ class VoiceInputApp:
         from PyObjCTools import AppHelper
         AppHelper.callAfter(lambda: self._card.showAnswer_withTitle_(text, title))
 
+    def _stage_label(self, label: str) -> None:
+        """切换 Thinking 阶段的细分标签（主线程执行）。"""
+        if self._hud is not None:
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(self._hud.setThinkingLabel_, label)
+
     # ---- 主线程：NSApp ----
 
     def run(self) -> None:
@@ -242,6 +258,11 @@ class VoiceInputApp:
 
         threading.Thread(target=self._hotkey.run, daemon=True).start()
         threading.Thread(target=self._worker, daemon=True).start()
+
+        # ASR 预热：worker 线程内先跑一次静音转写，首次真实听写即热
+        # （模型与词典常驻内存，与懒加载占用相同，只是把加载挪到启动期）
+        import numpy as np
+        self._queue.put((np.zeros(16000, dtype=np.float32), "_warmup", None))
 
         # Ctrl+C：信号处理器只置标志，主线程由定时轮询执行退出
         signal.signal(signal.SIGINT, lambda *a: setattr(self, "_quit", True))
