@@ -405,6 +405,19 @@ class WaveformHUDController(NSObject):
         if self._model.state == "thinking":
             self.hide()
 
+    def showNotice_(self, message: str) -> None:
+        """通用短提示（纠错学习失败、未读到选区等），与 showLearned_ 共用 2.6s 收拢。
+
+        纠错学习的失败路径过去只有 print()，跑在 launchd 下等于没有任何反馈。
+        """
+        self._label.setStringValue_(message)
+        self._model.set_state("thinking")
+        self.show()
+        if self._learn_timer is not None:
+            self._learn_timer.invalidate()
+        self._learn_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            2.6, self, "autoHideLearned:", None, False)
+
     # ---------- 帧循环 ----------
 
     def tick_(self, timer) -> None:

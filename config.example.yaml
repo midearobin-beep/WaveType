@@ -22,6 +22,7 @@ llm:
   # think: false                  # 关闭思考
   # keep_alive: 30m               # 延长驻留，避免闲置后首句等 30s
   enabled: true           # false = 直通 ASR 原文（--raw 等效）
+  hard_apply_dict: true   # 确定性词典层：输出再过一遍 wrong→right 硬替换（≥2 字词条）
 
 inject:
   chars_per_second: 60    # 逐字打字速度（非流式：模型处理完一次性打出）
@@ -35,6 +36,16 @@ hotkey:
 modes:
   translate: true         # Fn+Shift 中英自动互译（说中文出英文，说英文出中文）
   ask: true               # Fn+Space 语音问答；选中文本后可语音编辑（"把这段改成…"）
+commands: true            # 语音命令：整句"换行/撤销/全选/保存…"直接发按键，不进 LLM
+
+# 支持 Markdown 的 App（前台 App 名子串匹配），命中后允许输出列表/粗体。
+# 内置：Obsidian/Bear/Typora/Notion/Craft/Logseq/语雀/飞书/Lark/Code/Cursor
+markdown_apps: []
+
+# 风格画像：从你对上屏文本的手动编辑中提炼抽象偏好（不含原文），注入润色 prompt
+style:
+  enabled: true
+  min_samples: 8          # 攒够 8 条编辑才提炼；之后每多 8 条自动重新提炼
 ask_card_secs: 12         # Ask 答案卡片自动收起时间（秒）
 
 memory:

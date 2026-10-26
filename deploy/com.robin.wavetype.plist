@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.robin.wavetype</string>
+
+	<!-- 直接跑 venv 里的解释器，绕过 start.sh 的交互式提示 -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/robinwang/Coding/语音输入本地部署/.venv/bin/python3</string>
+		<string>-u</string>
+		<string>/Users/robinwang/Coding/语音输入本地部署/main.py</string>
+		<string>-v</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/robinwang/Coding/语音输入本地部署</string>
+
+	<!-- 登录即启动 -->
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- 崩溃才拉起；正常退出（launchctl bootout / 未来加退出菜单）不重启 -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<!-- 反复失败时的最小重启间隔，防止疯狂重启刷日志 -->
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+
+	<!-- 这是带窗口的应用（HUD/答案卡片），给它交互优先级 -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
+
+	<!-- 注意：Python 的 logging 默认写 stderr，所以真正的日志在 wavetype.log -->
+	<key>StandardErrorPath</key>
+	<string>/Users/robinwang/Library/Logs/WaveType/wavetype.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/robinwang/Library/Logs/WaveType/wavetype.stdout.log</string>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+	</dict>
+</dict>
+</plist>

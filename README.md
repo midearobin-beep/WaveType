@@ -17,9 +17,17 @@
 - **ASR stays local** — speech recognition always runs on-device via [Qwen3-ASR](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-8bit) (MLX, Apple Silicon native). The cleanup/translate/ask LLM can be a local Ollama model (fully offline) or an OpenAI-compatible cloud API (DeepSeek, Moonshot…) — only *text* ever leaves the machine
 - **Waveform HUD** — a Siri-inspired floating energy line: appears from its center while listening, collapses back into the center when done; `Listening` / `Thinking` states with distinct motion & color treatment
 - **Speech-gated visualization** — Silero VAD (onnxruntime, CPU) ensures only your voice drives the waveform; keyboard clicks, fans and door slams leave it perfectly flat. Visual gating only — ASR always receives the untouched raw audio
-- **Personal memory** — it learns from your corrections **automatically**: after typing, WaveType watches the target field (Accessibility API, ~60s window); if you edit what it wrote, the correction pair is diffed out and stored in a local SQLite dictionary, then immediately re-injected as ASR hotwords + LLM constraints. No gestures needed. (For apps where AX readback fails, select the corrected text and tap `Ctrl+Fn` instead.) The more you use it, the fewer mistakes it makes
-- **Plain-text lists** — spoken enumerations become `1. 2. 3.` numbered lists with Tab indentation. No Markdown symbols leaking into your input fields
-- **Anti-hallucination guardrails** — fidelity-first prompt + repetition-loop detection + length-ratio fallback to raw ASR output
+- **Personal memory** — it learns from your corrections **automatically**: after typing, WaveType watches the target field (Accessibility API, ~60s window); if you edit what it wrote, the correction pair is diffed out and stored in a local SQLite dictionary, then immediately re-injected as ASR hotwords + LLM constraints. No gestures needed. (For apps where AX readback fails — WeChat/WeCom and other non-native UIs — select the corrected text and tap `Ctrl+Fn` instead; both paths now report success *and* failure on the HUD, and log the reason.) The more you use it, the fewer mistakes it makes
+  - What gets learned: same-position replacements — homophone terms (`巨龙`→`居隆`), units and symbols (`度`→`℃`, `瓦`→`W`, `兆`→`MB`), numerals (`六百`→`600`)
+  - What is deliberately *not* learned: pure insertions/deletions (spacing edits, duplicate-word deletion) — a `wrong → right` table cannot express them without over-generalising, and the polish prompt already handles stutter. A quality gate (`voice_input/memory.py:is_learnable`) rejects noise like `5 → 5℃` or `我 → 你`, which would otherwise be enforced globally as "必须严格遵守"
+  - `python3 main.py dict` lists entries and the ASR hotwords currently injected
+- **Plain-text lists** — spoken enumerations become `1. 2. 3.` numbered lists with Tab indentation. No Markdown symbols leaking into your input fields — *unless* the target supports it: in Markdown-capable apps (Obsidian, Typora, Notion, 飞书… configurable via `markdown_apps`) lists and **bold** are emitted natively
+- **Cursor context awareness** — the polisher sees the text around your cursor (read at recording start via AX): replies don't re-greet the sender, enumerations continue the preceding list's numbering, and a leading punctuation dedup rule prevents `。。` seams at the junction
+- **Voice commands** — a whole-utterance match like `换行`, `撤销`, `全选`, `保存` sends the keystroke directly (never reaches the LLM); `换行换行` presses Return twice. Disable with `commands: false`
+- **Style profile** — every edit you make after injection is logged locally (`style_edits` table); once enough samples accumulate, a local distillation pass (`python3 main.py style`, or automatic) summarizes abstract preferences ("聊天：偏好短句") — never the raw content — and injects them into the polish prompt. Typeless's `/user/traits`, fully on-device. Disable with `style.enabled: false`
+- **Deterministic dictionary layer** — beyond ASR hotwords + LLM prompt constraints, learned pairs are also hard-applied as a final regex/substring pass (FluidVoice-style), so "LLM ignored the dictionary" can no longer leak through. `llm.hard_apply_dict: false` to opt out
+- **Menu bar icon** — WaveType lives in the menu bar: recording status dot, dictionary/style stats, quick access to `config.yaml`, and Quit
+- **Anti-hallucination guardrails** — fidelity-first prompt (deliberate repetition and courtesy words are kept, per FluidVoice's rules) + repetition-loop detection + length-ratio fallback to raw ASR output (relaxed automatically for mid-speech corrections and enumerations)
 
 ## 🎬 Demo
 
@@ -60,9 +68,10 @@ python3 main.py --setup              # re-open the wizard anytime
 
 ```bash
 source .venv/bin/activate
-python3 main.py          # start
-python3 main.py --raw    # skip LLM cleanup, raw ASR output
-python3 main.py -v       # debug logs
+python3 main.py              # start
+python3 main.py --settings   # settings GUI: model / API key / token usage
+python3 main.py --raw        # skip LLM cleanup, raw ASR output
+python3 main.py -v           # debug logs
 ```
 
 | Gesture | Action |
@@ -119,6 +128,15 @@ NSApp event loop for the HUD.
 All visual constants (HUD size, amplitude, glow, gradient speed, attack/release,
 animation durations) live in the `C` class at the top of `voice_input/hud.py`.
 Run `--demo` and tweak live.
+
+## 🧪 Tests
+
+Learning-chain logic is covered by an offline test suite (no pytest needed — it also
+fakes the focused text field to exercise the whole AutoLearner loop):
+
+```bash
+./.venv/bin/python3 tests/test_learning.py      # 43 checks: gate / pairs / wrong-extract / store / loop
+```
 
 ## 🗺️ Roadmap
 

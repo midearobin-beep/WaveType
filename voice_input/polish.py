@@ -34,15 +34,16 @@ SYSTEM_PROMPT = """你在把用户的语音转写原文整理成可直接上屏�
 
 要做：
 - 去掉句中口癖填充词（嗯、呃、那个、就是说、你知道吗等），口吃重复只留一遍
-- 但"嗯 / 对 / 好 / 行 / 是的"作为独立应答出现时（如"嗯，好的"），是回答内容，保留
+- 但刻意的重复是强调手段，必须保留（"非常非常"、"走了走了"不得改成单遍）；
+  "嗯 / 对 / 好 / 行 / 是的"作为独立应答出现时（如"嗯，好的"），是回答内容，保留；
+  "请 / 谢谢 / 麻烦"等礼貌用语一律保留
 - 中途改口只保留最终说法（"周三不对周四" → 周四）
 - 把破碎口语重组为通顺的书面句：可调整语序、合并碎句、按语义分段
 - 改动幅度最小化：长度与原话相当，不扩写、不缩写、不做摘要
 - 保持说话人的第一人称和语气强度（"我觉得"不要改成"我认为"）
 - 补齐标点；中英混排各保持原语言；中英文之间加一个空格
 - 数字用半角；型号、标准号、单位、人名一律原样保留，不翻译、不补全、不改写
-- 明确列举多项时整理成纯文本编号列表（1. 2. 3.，换行，子项 Tab 缩进），
-  单事项保持段落；禁用 Markdown 符号（-、*、#、**、>）
+{format_rule}
 
 不做：
 - 不加原文没有的信息，不改变观点和事实，不翻译
@@ -86,6 +87,43 @@ APP_CONTEXT_TEMPLATE = """
 - 浏览器/其他：中性处理，同默认规则
 """
 
+# 格式规则（P1a）：按输入框能力二选一，运行时替换 SYSTEM_PROMPT 里的 {format_rule}。
+# Typeless 的 input_capabilities.supports_markdown 同款：纯文本框禁用 Markdown，
+# 富文本框（Obsidian/飞书文档/Notion 等）里列表和粗体恰恰是该用的。
+FORMAT_RULE_PLAIN = """- 明确列举多项时整理成纯文本编号列表（1. 2. 3.，换行，子项 Tab 缩进），
+  单事项保持段落；禁用 Markdown 符号（-、*、#、**、>）"""
+FORMAT_RULE_MARKDOWN = """- 当前输入框支持 Markdown：列举多项时用 "1. " 编号或 "- " 列表（子项两空格缩进），
+  单事项保持段落；重点词可用 **粗体**；不用 # 标题、不用 > 引用、不输出代码块"""
+
+# 光标上下文（P0）：对标 Typeless cursor_state。让输出与已有内容自然衔接：
+# 回复邮件不重复称呼、接着上文列表编号、句式对齐。读不到时整块不出现。
+CONTEXT_TEMPLATE = """
+上下文（光标前后的已有文字，仅供衔接参考，不是待整理内容）：
+<上文>
+{before}
+</上文>
+<下文>
+{after}
+</下文>
+衔接规则：输出从光标处自然接续；上文已有的称呼、落款、开场白不得重复；
+上文是未完成的编号列表时接着上文编号继续；不要复述或评论上下文内容。
+"""
+
+# 风格画像（P1b）：从用户历史编辑提炼的抽象偏好（对标 Typeless /user/traits）。
+# 只含抽象描述、不含任何原文内容。
+STYLE_TEMPLATE = """
+用户写作风格画像（从历史编辑提炼的偏好，语气微调用，优先级低于其他规则）：
+{profile}
+"""
+
+# 支持 Markdown 输入框的 App（按 localizedName 子串匹配，大小写不敏感；
+# 可在 config.yaml 的 markdown_apps 追加）。命中后润色/翻译用 FORMAT_RULE_MARKDOWN。
+# 注意 VS Code 的 localizedName 是 "Code"。
+MARKDOWN_APPS = frozenset({
+    "Obsidian", "Bear", "Typora", "Notion", "Craft", "Logseq", "语雀",
+    "飞书", "Lark", "Code", "Cursor",
+})
+
 TRANSLATE_PROMPT = """你是中英互译引擎。把 <转写原文> 标签里的口述内容翻译成另一种语言。
 
 规则：
@@ -94,8 +132,8 @@ TRANSLATE_PROMPT = """你是中英互译引擎。把 <转写原文> 标签里的
 - 原文是中文 → 翻译成地道、自然的英文；原文是英文 → 翻译成地道、自然的中文
 - 意译优先于逐字直译：按目标语言的母语表达习惯组织句子（如"现场改" → "on the spot"）
 - 保留原文结构：原文是列举/分点（第一步…第二步…、1. 2. 3.、多条目并列）时，
-  译文也用纯文本编号列表（1. 2. 3. 换行，子项 Tab 缩进），不得揉成一整段；
-  原文是连贯段落则保持段落。禁用 Markdown 符号（-、*、#、**、>）
+  译文也用编号列表（1. 2. 3. 换行，子项缩进），不得揉成一整段；
+  原文是连贯段落则保持段落。{md_note}
 - 语音转写可能有同音误字（"六万零三百三十五" → 60335），先按语境纠正再翻译
 - 型号、标准号、单位、人名、品牌名一律原样保留，不翻译、不音译
   （如 AM4205、IEC 60335-2-40、EN 14825、Robin）
@@ -121,6 +159,10 @@ TRANSLATE_PROMPT = """你是中英互译引擎。把 <转写原文> 标签里的
 2. Verify the translation
 3. Check the ask card
 """
+
+# 翻译 prompt 的格式注记（P1a，同 FORMAT_RULE_* 的开关逻辑）
+MD_NOTE_PLAIN = "禁用 Markdown 符号（-、*、#、**、>）"
+MD_NOTE_MARKDOWN = '输入框支持 Markdown：列表可用 "- "，重点可用 **粗体**，不用标题和引用'
 
 ASK_PROMPT = """你在响应用户的语音指令。指令在 <指令> 标签里；若用户事先选中了一段文本，
 则该文本在 <选中文本> 标签里（可能没有）。
@@ -157,7 +199,8 @@ class Polisher:
                  think: bool = False, enabled: bool = True,
                  provider: str = "openai", keep_alive: str = "30m",
                  api_key: str | None = None, api_key_env: str = "DEEPSEEK_API_KEY",
-                 timeout: float = 20.0, disable_thinking: bool = True) -> None:
+                 timeout: float = 20.0, disable_thinking: bool = True,
+                 hard_apply_dict: bool = True) -> None:
         self._provider = provider
         self._model = model
         self._base_url = base_url.rstrip("/")
@@ -169,6 +212,12 @@ class Polisher:
         self._timeout = timeout
         self._disable_thinking = disable_thinking
         self._mappings: list[tuple[str, str]] = []
+        self._dict_regex_cache: list | None = None  # 硬替换用的编译缓存
+        # FluidVoice 式确定性词典层（第三路回注）：LLM 输出/原文上都会再过一遍
+        # wrong→right 替换，兜住"LLM 没遵守词典约束"的漏网。可在 config 关闭。
+        self._hard_apply_dict = bool(hard_apply_dict)
+        self._style_profile: str = ""  # 风格画像（P1b），由 app 层注入
+        self._usage = None   # UsageLogger，由 app 层注入（set_usage_logger）
         self._client = None  # 惰性创建，避免只用云后端时白建本地客户端
 
         if self._provider == "ollama":
@@ -184,20 +233,90 @@ class Polisher:
     def set_dictionary(self, mappings: list[tuple[str, str]]) -> None:
         """注入个人词典纠错映射 [(错误形式, 正确形式)]。"""
         self._mappings = mappings
+        self._dict_regex_cache = None  # 词典变了，硬替换缓存重建
+
+    def set_style_profile(self, profile: str) -> None:
+        """注入风格画像（抽象偏好描述，不含原文）。空串表示不启用。"""
+        self._style_profile = (profile or "").strip()
+
+    def set_usage_logger(self, logger) -> None:
+        """注入 token 用量记录器（voice_input.usage.UsageLogger）。"""
+        self._usage = logger
 
     def _system(self, base: str, app: str | None = None,
-                dict_template: str = DICT_TEMPLATE) -> str:
-        """组装 system prompt：基础规则 + 词典约束 + 前台 App 语境。"""
+                dict_template: str = DICT_TEMPLATE,
+                markdown: bool = False,
+                before: str = "", after: str = "") -> str:
+        """组装 system prompt：基础规则（含格式档）+ 词典 + App 语境 + 光标上下文 + 风格画像。"""
+        if "{format_rule}" in base:
+            base = base.replace(
+                "{format_rule}",
+                FORMAT_RULE_MARKDOWN if markdown else FORMAT_RULE_PLAIN)
+        if "{md_note}" in base:
+            base = base.replace(
+                "{md_note}", MD_NOTE_MARKDOWN if markdown else MD_NOTE_PLAIN)
         parts = [base]
         if self._mappings:
             pairs = "\n".join(f"{w} → {r}" for w, r in self._mappings)
             parts.append(dict_template % pairs)
         if app:
             parts.append(APP_CONTEXT_TEMPLATE.format(app=app))
+        # P0：光标上下文。before/after 任一非空才注入（读不到时整块不出现）。
+        if before or after:
+            parts.append(CONTEXT_TEMPLATE.replace("{before}", _strip_tags(before))
+                         .replace("{after}", _strip_tags(after)))
+        # P1b：风格画像（抽象偏好，优先级最低，只微调语气）
+        if self._style_profile:
+            parts.append(STYLE_TEMPLATE.replace("{profile}",
+                                                _strip_tags(self._style_profile)))
         return "".join(parts)
 
-    def polish(self, text: str, app: str | None = None) -> str:
-        """返回上屏文本；返回空串表示"这句话没有内容，不要上屏"。"""
+    def _apply_dictionary(self, text: str) -> str:
+        """确定性词典替换（FluidVoice 规则层同款）：LLM 是软约束，这是硬兜底。
+
+        - 拉丁词条：词边界 + 忽略大小写（"wanjulong" 也能纠成 "Wanjulong"）
+        - CJK/混合词条：直接子串替换（"万巨龙" → "万居隆"正是纠错语义）
+        - 单字词条不做硬替换（度→℃ 这类歧义太大，留给 ASR 热词和 LLM 软约束）
+        """
+        if not self._hard_apply_dict or not self._mappings or not text:
+            return text
+        import re
+        if self._dict_regex_cache is None:
+            cache = []
+            for wrong, right in self._mappings:
+                if len(wrong) < 2:
+                    continue
+                if wrong.isascii() and wrong.replace(" ", "").isalnum():
+                    pat = re.compile(r"\b" + re.escape(wrong) + r"\b", re.IGNORECASE)
+                else:
+                    pat = re.compile(re.escape(wrong))
+                cache.append((pat, right, len(wrong)))
+            # 长词优先，防短词先匹配吃掉长词的子串
+            cache.sort(key=lambda x: -x[2])
+            self._dict_regex_cache = cache
+        out = text
+        for pat, right, _ in self._dict_regex_cache:
+            out = pat.sub(right, out)
+        return out
+
+    @staticmethod
+    def _join_with_context(out: str, before: str) -> str:
+        """与上文的接缝规则（FluidVoice continuous-dictation formatting 的中文版）：
+        上文以标点结尾、输出以标点开头 → 去掉输出的前导标点，防"。。"接缝。"""
+        if not out or not before:
+            return out
+        tail = before.rstrip()
+        if tail and tail[-1] in "，。、！？；：,.!?;:…" and out[0] in "，。、！？；：,.!?;:…":
+            out = out[1:]
+        return out
+
+    def polish(self, text: str, app: str | None = None, *,
+               before: str = "", after: str = "", markdown: bool = False) -> str:
+        """返回上屏文本；返回空串表示"这句话没有内容，不要上屏"。
+
+        before/after：光标前后文（selection.read_cursor_context），供衔接。
+        markdown：目标输入框是否支持 Markdown（决定列表/粗体规则档）。
+        """
         if not self.enabled or not text.strip():
             return text
         # 整句都是口水词（"那个那个那个 呃 就是"）：直接丢弃，不调模型也不上屏。
@@ -205,12 +324,14 @@ class Polisher:
         if _meaningful_len(text) == 0:
             log.info("丢弃：无实义内容（%s）", text)
             return ""
-        system = self._system(SYSTEM_PROMPT, app)
+        system = self._system(SYSTEM_PROMPT, app, markdown=markdown,
+                              before=before, after=after)
         try:
-            out = self._complete(system, _wrap(text), max_tokens=self._cap(text))
-        except Exception as e:  # 网络/配额/服务异常：绝不阻塞上屏，回退原文
+            out = self._complete(system, _wrap(text), max_tokens=self._cap(text),
+                                 feature="polish")
+        except Exception as e:  # 网络/配额/服务异常：绝不阻塞上屏，回退原文+词典硬替换
             log.warning("润色调用失败（%s: %s），回退 ASR 原文", type(e).__name__, e)
-            return text
+            return self._apply_dictionary(text)
         out = (out or "").strip()
         log.info("润色: %s → %s", text, out)
         # 兜底：小模型偶发丢内容/复读/膨胀，异常则回退原文。
@@ -221,29 +342,34 @@ class Polisher:
         if not out or len(out) < lo or len(out) > hi:
             log.warning("润色结果异常（长度 %d→%d，允许 %d~%d），回退 ASR 原文",
                         n, len(out), lo, hi)
-            return text
+            return self._apply_dictionary(text)
         if _has_repetition_loop(out):
             log.warning("润色结果异常（复读），回退 ASR 原文")
-            return text
-        return out
+            return self._apply_dictionary(text)
+        out = self._apply_dictionary(out)
+        return self._join_with_context(out, before)
 
-    def translate(self, text: str, app: str | None = None) -> str:
+    def translate(self, text: str, app: str | None = None, *,
+                  before: str = "", after: str = "", markdown: bool = False) -> str:
         """中英自动互译：原文中文 → 英文，原文英文 → 中文。失败回退原文。"""
         if not self.enabled or not text.strip():
             return text
-        system = self._system(TRANSLATE_PROMPT, app)
+        system = self._system(TRANSLATE_PROMPT, app, markdown=markdown,
+                              before=before, after=after)
         try:
-            out = self._complete(system, _wrap(text), max_tokens=self._cap(text))
+            out = self._complete(system, _wrap(text), max_tokens=self._cap(text),
+                                 feature="translate")
         except Exception as e:
             log.warning("翻译调用失败（%s: %s），回退 ASR 原文", type(e).__name__, e)
-            return text
+            return self._apply_dictionary(text)
         out = (out or "").strip()
         log.info("翻译: %s → %s", text, out)
         # 翻译天然改变长度（中→英通常膨胀 ~1.5x），不做长度护栏，只防复读与空输出
         if not out or _has_repetition_loop(out):
             log.warning("翻译结果异常，回退 ASR 原文")
-            return text
-        return out
+            return self._apply_dictionary(text)
+        out = self._apply_dictionary(out)
+        return self._join_with_context(out, before)
 
     def ask(self, question: str, context: str | None = None,
             app: str | None = None) -> tuple[str, str]:
@@ -259,7 +385,8 @@ class Polisher:
         system = self._system(ASK_PROMPT, app, ASK_DICT_TEMPLATE)
         try:
             out = self._complete(system, user, temperature=0.3,
-                                 max_tokens=self._cap(question, floor=256))
+                                 max_tokens=self._cap(question, floor=256),
+                                 feature="ask")
         except Exception as e:
             log.warning("Ask 调用失败（%s: %s）", type(e).__name__, e)
             return "answer", ""
@@ -284,7 +411,8 @@ class Polisher:
     # ---- 后端适配 ----
 
     def _complete(self, system: str, user: str, *,
-                  temperature: float = 0.1, max_tokens: int = 128) -> str:
+                  temperature: float = 0.1, max_tokens: int = 128,
+                  feature: str = "polish") -> str:
         """统一的 LLM 调用。user 由调用方组装（素材标签由 _wrap/ask 各自处理）。"""
         if self._provider == "ollama":
             resp = self._client.chat(
@@ -297,6 +425,9 @@ class Polisher:
                 keep_alive=self._keep_alive,
                 options={"temperature": temperature, "num_predict": max_tokens},
             )
+            self._record_usage(feature,
+                               getattr(resp, "prompt_eval_count", None) or 0,
+                               getattr(resp, "eval_count", None) or 0)
             return resp.message.content or ""
 
         if not getattr(self, "_api_key", ""):
@@ -325,10 +456,39 @@ class Polisher:
             )
             resp.raise_for_status()
             data = resp.json()
+        usage = data.get("usage") or {}
+        self._record_usage(feature,
+                           int(usage.get("prompt_tokens") or 0),
+                           int(usage.get("completion_tokens") or 0))
         return data["choices"][0]["message"].get("content") or ""
 
+    def _record_usage(self, feature: str, prompt_tokens: int,
+                      completion_tokens: int) -> None:
+        """落一条 token 用量。未注入 logger 或两端都返回 0（未上报）时跳过。"""
+        if self._usage is None or (prompt_tokens == 0 and completion_tokens == 0):
+            return
+        self._usage.log(feature, self._model, prompt_tokens, completion_tokens)
 
-_CORRECTION_MARKERS = ("不对", "不是", "改成", "算了", "我是说", "重说", "更正", "应该是")
+
+# 改口标记词（P2）：命中的原文在长度护栏上享受压缩放宽。
+# 漏检的代价最大——正确的改口压缩会被误判"丢内容"而回退原文上屏，
+# 因此词表宁宽勿窄（误命中只是把下限放宽，不会改坏输出本身）。
+_CORRECTION_MARKERS = (
+    "不对", "不是", "改成", "算了", "我是说", "重说", "更正", "应该是",
+    "我记错", "记错了", "说错", "哦不", "诶不", "啊不", "重新说", "换个说法",
+    "收回", "当我没说", "划掉", "改成说", "不不不",
+)
+
+# 列举信号（P3）：口语里明确在列多项时的标志词。≥3 个视为列举句，
+# 整理成编号列表的压缩率天然高，长度护栏下限需要放宽。
+_ENUM_MARKERS = ("第一", "第二", "第三", "第四", "第五", "首先", "其次", "再次",
+                 "然后", "接着", "最后", "一是", "二是", "三是", "步骤", "第1", "第2",
+                 "第3", "其一", "其二", "另外", "还有")
+
+
+def _has_enumeration(text: str) -> bool:
+    """是否列举句：≥3 个列举信号词。"""
+    return sum(1 for m in _ENUM_MARKERS if m in text) >= 3
 
 # 口癖填充词：用于判断"这句话是否压根没内容"（只做丢弃判定，不用于改写）
 _FILLERS = ("嗯", "呃", "啊", "哦", "噢", "那个", "这个", "就是", "然后",
@@ -345,7 +505,7 @@ def _meaningful_len(text: str) -> int:
     return len(t.strip(_PUNCT))
 
 
-_STRUCT_TAGS = ("转写原文", "指令", "选中文本")
+_STRUCT_TAGS = ("转写原文", "指令", "选中文本", "上文", "下文", "风格画像", "编辑记录")
 
 
 def _wrap(text: str) -> str:
@@ -371,6 +531,8 @@ def _length_bounds(text: str) -> tuple[int, int]:
     "那个那个那个 呃 就是 我想说的是" 的实义内容只有"我想说的是"，
     按原始 25 字算下限会把正确输出（"我想说的是。"）误判为丢内容而回退废话。
     改口句（"周三——不对，周四"）只保留最终说法，压缩得更狠，单独放宽。
+    列举句（"第一步…第二步…第三步…"）整理成编号列表后压缩率天然高，
+    下限再放宽（P3：实测 300 字口语列举常整理到 70 字以下，0.25 会误杀）。
     上限用于防止模型扩写或补充解释。
     """
     raw = len(text)
@@ -378,6 +540,8 @@ def _length_bounds(text: str) -> tuple[int, int]:
     ratio = 0.5 if eff < 100 else (0.35 if eff < 300 else 0.25)
     if _has_correction(text):
         ratio *= 0.5
+    if _has_enumeration(text):
+        ratio *= 0.7
     return max(3, int(eff * ratio)), max(int(raw * 1.6), raw + 6)
 
 
