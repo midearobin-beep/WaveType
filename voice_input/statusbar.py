@@ -14,9 +14,42 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_ICON = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
-
 _MODE_LABEL = {"dictate": "听写中", "translate": "翻译中", "ask": "问答中"}
+
+
+def _make_sine_image(size: int = 18):
+    """程序绘制的正弦波菜单栏图标：一个完整周期，圆头线，template 渲染。
+
+    不依赖 assets 里的文件，深浅色菜单栏都由系统取色。
+    """
+    import math
+
+    from AppKit import NSBezierPath, NSColor, NSImage
+    from Foundation import NSPoint, NSSize
+
+    image = NSImage.alloc().initWithSize_(NSSize(size, size))
+    image.lockFocus()
+    try:
+        path = NSBezierPath.bezierPath()
+        path.setLineWidth_(1.8)
+        path.setLineCapStyle_(1)   # 圆头
+        path.setLineJoinStyle_(1)  # 圆角连接
+        amp = size * 0.30          # 振幅：波峰波谷不贴边
+        mid = size / 2.0
+        steps = size * 2           # 采样够密，曲线才平滑
+        for i in range(steps + 1):
+            x = size * i / steps
+            y = mid + amp * math.sin(2 * math.pi * i / steps)
+            if i == 0:
+                path.moveToPoint_(NSPoint(x, y))
+            else:
+                path.lineToPoint_(NSPoint(x, y))
+        NSColor.blackColor().setStroke()  # template 模式下颜色被系统接管
+        path.stroke()
+    finally:
+        image.unlockFocus()
+    image.setTemplate_(True)
+    return image
 
 
 class StatusBarController:
@@ -31,15 +64,7 @@ class StatusBarController:
         self._item = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSVariableStatusItemLength)
         button = self._item.button()
-        if _ICON.is_file():
-            image = NSImage.alloc().initWithContentsOfFile_(str(_ICON))
-            if image is not None:
-                from Foundation import NSSize
-                image.setSize_(NSSize(18, 18))
-                image.setTemplate_(True)  # 模板渲染：深浅色菜单栏都清晰
-                button.setImage_(image)
-        if button.image() is None:
-            button.setTitle_("🎙")  # 图标文件缺失时的兜底
+        button.setImage_(_make_sine_image())
         button.setToolTip_("WaveType 语音输入")
 
         self._menu = NSMenu.alloc().init()
