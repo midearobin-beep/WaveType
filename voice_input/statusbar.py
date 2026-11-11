@@ -10,11 +10,47 @@ marshal 回主线程，状态更新方法是纯 Python 方法即可被 callAfter
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 _MODE_LABEL = {"dictate": "听写中", "translate": "翻译中", "ask": "问答中"}
+_LAUNCHD_LABEL = "com.robin.wavetype"
+
+
+def _launchd_target() -> str | None:
+    """在 launchd 下运行时返回 gui/<uid>/<label>，否则 None。"""
+    if os.environ.get("XPC_SERVICE_NAME") == _LAUNCHD_LABEL:
+        return f"gui/{os.getuid()}/{_LAUNCHD_LABEL}"
+    return None
+
+
+def _terminate() -> None:
+    from AppKit import NSApplication
+    NSApplication.sharedApplication().terminate_(None)
+
+
+def _quit() -> None:
+    """退出。launchd 下 KeepAlive=true，直接退出会被立刻拉起，
+    所以要 bootout 注销服务（下次登录自动恢复）。"""
+    target = _launchd_target()
+    if target is None:
+        _terminate()
+        return
+    log.info("菜单退出：launchctl bootout %s", target)
+    subprocess.Popen(["/bin/launchctl", "bootout", target])
+
+
+def _restart() -> None:
+    target = _launchd_target()
+    if target is None:
+        log.info("菜单重启：execv")
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+    log.info("菜单重启：launchctl kickstart -k %s", target)
+    subprocess.Popen(["/bin/launchctl", "kickstart", "-k", target])
 
 
 def _make_voice_image(size: int = 18):
@@ -99,6 +135,11 @@ class StatusBarController:
         open_cfg.setTarget_(self._target())
         self._menu.addItem_(open_cfg)
 
+        restart_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "重启 WaveType", "restartApp:", "")
+        restart_item.setTarget_(self._target())
+        self._menu.addItem_(restart_item)
+
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "退出 WaveType", "quitApp:", "q")
         quit_item.setTarget_(self._target())
@@ -119,9 +160,11 @@ class StatusBarController:
                     from AppKit import NSWorkspace
                     NSWorkspace.sharedWorkspace().openFile_(str(controller._config_path))
 
+                def restartApp_(self, _sender):
+                    _restart()
+
                 def quitApp_(self, _sender):
-                    from AppKit import NSApplication
-                    NSApplication.sharedApplication().terminate_(None)
+                    _quit()
 
             self._target_obj = _Target.alloc().init()
         return self._target_obj

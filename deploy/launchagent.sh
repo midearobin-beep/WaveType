@@ -21,6 +21,7 @@ PLIST_SRC="$PROJECT_DIR/deploy/$LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/WaveType"
 LOG_MAIN="$LOG_DIR/wavetype.log"
+LOG_ERR="$LOG_DIR/wavetype.stderr.log"   # 未捕获异常等 stderr 输出
 DOMAIN="gui/$(id -u)"
 
 # 真实解释器存在才提示（软链被解析后 TCC 可能认的是它）
@@ -143,6 +144,11 @@ do_status() {
     tail -n 12 "$LOG_MAIN" | sed 's/^/    /'
   else
     say "    （还没有日志：${LOG_MAIN}）"
+  fi
+  if [ -s "$LOG_ERR" ]; then
+    say ""
+    say "stderr（未捕获异常）："
+    tail -n 8 "$LOG_ERR" | sed 's/^/    /'
   fi
 }
 

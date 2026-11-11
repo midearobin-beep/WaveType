@@ -420,11 +420,29 @@ class WaveformHUDController(NSObject):
 
     # ---------- 帧循环 ----------
 
+    # Thinking 看门狗：处理管线任何未覆盖的退出路径漏掉 hide 时，HUD 不能永久卡住。
+    # 管线上限约为 ASR 数秒 + LLM timeout 20s + 长文本逐字上屏，90s 足够宽。
+    _THINKING_WATCHDOG_S = 90.0
+
+    @objc.python_method
+    def _watchdog(self, now: float) -> None:
+        if self._model.state == "thinking" and self._model._target > 0.5:
+            since = getattr(self, "_thinking_since", None)
+            if since is None:
+                self._thinking_since = now
+            elif now - since > self._THINKING_WATCHDOG_S:
+                log.warning("HUD 停留 Thinking 超过 %.0fs，自动收起", self._THINKING_WATCHDOG_S)
+                self._thinking_since = None
+                self.hide()
+        else:
+            self._thinking_since = None
+
     def tick_(self, timer) -> None:
         import time
         now = time.monotonic()
         dt = min(0.05, now - self._last_tick) if self._last_tick else C.FPS
         self._last_tick = now
+        self._watchdog(now)
         rms, speech_prob = self._provider()
         self._model.tick(dt, rms, speech_prob)
         state = self._model.render_state()

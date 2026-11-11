@@ -51,7 +51,8 @@ class ASR:
                 kwargs["context"] = self._context
             result = self._session.transcribe(str(tmp_path), **kwargs)
             text = (result.text or "").strip()
-            log.info("ASR: %s", text)
+            log.info("ASR: %d 字", len(text))
+            log.debug("ASR: %s", text)
             return text
         finally:
             tmp_path.unlink(missing_ok=True)

@@ -11,7 +11,9 @@
 		<string>/Users/robinwang/Coding/语音输入本地部署/.venv/bin/python3</string>
 		<string>-u</string>
 		<string>/Users/robinwang/Coding/语音输入本地部署/main.py</string>
-		<string>-v</string>
+		<!-- 应用日志自行轮转写入（5MB×3）；排查热键时临时加 -v 打开 DEBUG -->
+		<string>--log-file</string>
+		<string>/Users/robinwang/Library/Logs/WaveType/wavetype.log</string>
 	</array>
 
 	<key>WorkingDirectory</key>
@@ -21,12 +23,11 @@
 	<key>RunAtLoad</key>
 	<true/>
 
-	<!-- 崩溃才拉起；正常退出（launchctl bootout / 未来加退出菜单）不重启 -->
+	<!-- 任何退出都拉起。旧配置 SuccessfulExit=false 时，菜单「退出」（退出码 0）后
+	     服务不再启动，直到下次登录（2026-11-09 实际发生，停了两天）。
+	     真正停止服务走菜单「退出」→ launchctl bootout。 -->
 	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
+	<true/>
 
 	<!-- 反复失败时的最小重启间隔，防止疯狂重启刷日志 -->
 	<key>ThrottleInterval</key>
@@ -36,9 +37,9 @@
 	<key>ProcessType</key>
 	<string>Interactive</string>
 
-	<!-- 注意：Python 的 logging 默认写 stderr，所以真正的日志在 wavetype.log -->
+	<!-- 应用日志由 --log-file 写 wavetype.log（自带轮转）；这里只接未捕获异常等 stderr 输出 -->
 	<key>StandardErrorPath</key>
-	<string>/Users/robinwang/Library/Logs/WaveType/wavetype.log</string>
+	<string>/Users/robinwang/Library/Logs/WaveType/wavetype.stderr.log</string>
 	<key>StandardOutPath</key>
 	<string>/Users/robinwang/Library/Logs/WaveType/wavetype.stdout.log</string>
 

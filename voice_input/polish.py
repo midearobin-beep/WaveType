@@ -349,7 +349,8 @@ class Polisher:
         if text.strip(_PUNCT) in {"嗯", "哦", "噢", "啊"}:
             return text
         if _meaningful_len(text) == 0:
-            log.info("丢弃：无实义内容（%s）", text)
+            log.info("丢弃：无实义内容（%d 字）", len(text))
+            log.debug("无实义内容原文：%s", text)
             return ""
         system = self._system(SYSTEM_PROMPT, app, window_title=window_title,
                               markdown=markdown, before=before, after=after)
@@ -373,7 +374,8 @@ class Polisher:
                     out = retry
             except Exception as e:
                 log.warning("列表重新整理失败（%s），保留首次结果", type(e).__name__)
-        log.info("润色: %s → %s", text, out)
+        log.info("润色: %d → %d 字", len(text), len(out or ""))
+        log.debug("润色: %s → %s", text, out)
         # 兜底：小模型偶发丢内容/复读/膨胀，异常则回退原文。
         # 长度判定分档 + 短句用绝对值下限：纯比例判定在短句上噪声过大，
         # 会把正确的改口压缩（"周三——不对，周四"）误判成"丢内容"。
@@ -404,7 +406,8 @@ class Polisher:
             log.warning("翻译调用失败（%s: %s），回退 ASR 原文", type(e).__name__, e)
             return self._apply_dictionary(text)
         out = (out or "").strip()
-        log.info("翻译: %s → %s", text, out)
+        log.info("翻译: %d → %d 字", len(text), len(out))
+        log.debug("翻译: %s → %s", text, out)
         # 翻译天然改变长度（中→英通常膨胀 ~1.5x），不做长度护栏，只防复读与空输出
         if not out or _has_repetition_loop(out):
             log.warning("翻译结果异常，回退 ASR 原文")

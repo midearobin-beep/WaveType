@@ -188,7 +188,13 @@ class VoiceInputApp:
         # 防幻觉两道防线（热词偏置下，静音/噪音会被 ASR 幻觉成词典词）：
         # ① 录音太短（误触）② VAD 全程没检测到人声 —— 直接收拢 HUD，不进 Thinking
         duration = len(audio) / 16000
-        if len(audio) and duration < 0.5:
+        if not len(audio):
+            # 0 样本（模式刚进场即收尾）：旧实现会落到 setThinking 却不入队，
+            # HUD 永久停在 Thinking
+            log.info("丢弃：空录音")
+            self._hide_hud()
+            return
+        if duration < 0.5:
             log.info("丢弃：录音过短 (%.2fs)", duration)
             self._hide_hud()
             return

@@ -45,11 +45,26 @@ def _dict_cmd(args) -> None:
             print(f"\n当前 ASR 热词（{len(hw)} 字）：{hw}")
 
 
+def _log_handlers(log_file: str | None) -> list[logging.Handler] | None:
+    """指定 --log-file 时用轮转文件；否则沿用 basicConfig 默认的 stderr。
+
+    旧部署靠 launchd 把 stderr 落到 wavetype.log，没有轮转，-v 下已涨到 10MB。
+    """
+    if not log_file:
+        return None
+    from logging.handlers import RotatingFileHandler
+    p = Path(log_file).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return [RotatingFileHandler(p, maxBytes=5 * 1024 * 1024, backupCount=3,
+                                encoding="utf-8")]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="本地语音输入")
     ap.add_argument("-c", "--config", default=str(Path(__file__).parent / "config.yaml"))
     ap.add_argument("--raw", action="store_true", help="跳过 LLM 润色，直接上屏 ASR 原文")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--log-file", help="日志写入文件并按 5MB×3 轮转（launchd 下使用）")
     ap.add_argument("--demo", action="store_true", help="HUD 演示模式：模拟电平，不用说话")
     ap.add_argument("--demo-secs", type=float, default=0, help="demo 自动退出秒数")
     ap.add_argument("--setup", action="store_true", help="打开首次运行设置向导（GUI）")
@@ -131,6 +146,7 @@ def main() -> None:
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=_log_handlers(args.log_file),
     )
     app = VoiceInputApp(Path(args.config))
     if args.raw:

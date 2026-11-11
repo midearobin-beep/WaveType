@@ -102,8 +102,9 @@ class FnHotkey:
     # ---------- 事件回调 ----------
 
     def _callback(self, proxy, event_type, event, refcon):
-        if event_type == Quartz.kCGEventTapDisabledByTimeout:
-            log.warning("event tap 超时被系统禁用，重新启用")
+        if event_type in (Quartz.kCGEventTapDisabledByTimeout,
+                          Quartz.kCGEventTapDisabledByUserInput):
+            log.warning("event tap 被系统禁用（type=%#x），重新启用", event_type)
             Quartz.CGEventTapEnable(self._tap, True)
             return event
 
@@ -153,21 +154,29 @@ class FnHotkey:
             self._check_alt_hotkey(flags)
 
         # Shift 按下沿（Fn 已按住）：
+        started_now = False
         if shift and not self._shift_down and fn and self._translate_enabled:
             if self._active is None:
                 log.debug("Fn+Shift → translate")
                 self._start("translate")
+                started_now = True
             elif (self._active == "dictate"
                   and time.monotonic() - self._active_since < _CHORD_GRACE_S):
                 # Fn 先落的 chord：刚开的口述取消，升级为翻译
                 log.debug("Fn+Shift（Fn 先落）→ 取消口述改走 translate")
                 self._cancel_dictate()
                 self._start("translate")
+                started_now = True
 
         # Fn 沿变化
         if fn != self._fn_down:
             if fn:  # Fn 按下沿
-                if ctrl and self._on_correct is not None:
+                if started_now:
+                    # Fn 与 Shift 的按下沿落在同一个事件里（flags=0x820102）：
+                    # 这个 Fn 沿属于进场组合键，不能当成"Fn 收尾"，
+                    # 否则翻译刚启动即结束，录到 0s 音频。
+                    pass
+                elif ctrl and self._on_correct is not None:
                     self._safe_call(self._on_correct)
                 elif self._active is not None:
                     self._finish()          # 任意模式：Fn 收尾
