@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 
 def _match_count(a: str, b: str) -> int:
-    return sum(m.size for m in difflib.SequenceMatcher(None, a, b).get_matching_blocks())
+    return sum(m.size for m in difflib.SequenceMatcher(None, a.lower(), b.lower()).get_matching_blocks())
 
 
 def extract_wrong(polished: str, selected: str, min_coverage: float = 0.3) -> str | None:
@@ -49,9 +49,9 @@ def extract_wrong(polished: str, selected: str, min_coverage: float = 0.3) -> st
             cov = _match_count(win, selected) / n
             if cov < min_coverage:
                 continue
-            if len(body) < n and (selected.startswith(body) or selected.endswith(body)):
+            if len(body) < n and (selected.lower().startswith(body.lower()) or selected.lower().endswith(body.lower())):
                 continue  # 截断窗口，见模块 docstring
-            edge = (win[0] == selected[0]) + (win[-1] == selected[-1])
+            edge = (win[0].lower() == selected[0].lower()) + (win[-1].lower() == selected[-1].lower())
             cands.append((edge, cov, -abs(wlen - n), win))
 
     if not cands:

@@ -1,7 +1,9 @@
 """记忆层：SQLite 个人词典 + 历史记录。
 
 飞轮设计（对标 Typeless Personal Dictionary，但数据完全本地）：
-- dictionary：纠错对（wrong → right），count 累计命中次数
+- dictionary：纠错对（wrong → right），count 累计命中次数；
+  trusted=0 的自动词条是「观察区」：count≥2 才进润色 prompt / 硬替换，
+  防止一次性语境改写（"讨论 → 要求明确"这类）立刻变成全局规则
 - history：每次听写的 raw ASR / 润色结果 / 前台 App，供后续风格画像使用
 - 词典回注两条路：ASR context 热词（源头防错）+ 润色 prompt 映射（兜底纠错）
 
@@ -26,6 +28,7 @@ CREATE TABLE IF NOT EXISTS dictionary (
     count INTEGER NOT NULL DEFAULT 1,
     first_seen REAL NOT NULL,
     last_seen REAL NOT NULL,
+    trusted INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (wrong, right)
 );
 CREATE TABLE IF NOT EXISTS history (
@@ -100,6 +103,11 @@ class MemoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
+        # 老库迁移：dictionary 补 trusted 列（0=自动学习观察区，1=手动添加即刻生效）
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(dictionary)")}
+        if "trusted" not in cols:
+            self._conn.execute(
+                "ALTER TABLE dictionary ADD COLUMN trusted INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
         self.path = path
         log.info("记忆库就绪: %s", path)
@@ -109,8 +117,9 @@ class MemoryStore:
     def add_correction(self, wrong: str, right: str, trusted: bool = False) -> bool:
         """写入纠错对，返回是否入库。
 
-        trusted=False（自动学习 / Ctrl+Fn）时先过 is_learnable 闸门；
-        trusted=True 用于 `dict add` 这类用户显式指定的词条。
+        trusted=False（自动学习 / Ctrl+Fn）时先过 is_learnable 闸门，
+        且词条进观察区（count≥2 才生效，见 mappings）；
+        trusted=True 用于 `dict add` 这类用户显式指定的词条，即刻生效。
         """
         wrong, right = wrong.strip(), right.strip()
         if not wrong or not right or wrong == right:
@@ -120,13 +129,14 @@ class MemoryStore:
             return False
         now = time.time()
         self._conn.execute(
-            """INSERT INTO dictionary (wrong, right, count, first_seen, last_seen)
-               VALUES (?, ?, 1, ?, ?)
+            """INSERT INTO dictionary (wrong, right, count, first_seen, last_seen, trusted)
+               VALUES (?, ?, 1, ?, ?, ?)
                ON CONFLICT(wrong, right) DO UPDATE SET count = count + 1, last_seen = ?""",
-            (wrong, right, now, now, now),
+            (wrong, right, now, now, int(trusted), now),
         )
         self._conn.commit()
-        log.info("词典入库: %s → %s", wrong, right)
+        log.info("词典入库%s: %s → %s", "（即刻生效）" if trusted else "（观察区）",
+                 wrong, right)
         return True
 
     def remove_correction(self, wrong: str, right: str) -> int:
@@ -135,10 +145,16 @@ class MemoryStore:
         self._conn.commit()
         return cur.rowcount
 
-    def mappings(self, min_count: int = 1) -> list[tuple[str, str]]:
-        """纠错映射（按频次降序），喂给润色 prompt。"""
+    def mappings(self, min_count: int = 2) -> list[tuple[str, str]]:
+        """纠错映射（按频次降序），喂给润色 prompt 与硬替换。
+
+        观察区语义：自动词条要 count≥min_count 才返回（同一纠错被观察到两次
+        才可信）；trusted=1 的手动词条不受此限，即刻生效。
+        """
         rows = self._conn.execute(
-            "SELECT wrong, right FROM dictionary WHERE count >= ? ORDER BY count DESC",
+            """SELECT wrong, right FROM dictionary
+               WHERE count >= ? OR trusted = 1
+               ORDER BY trusted DESC, count DESC""",
             (min_count,),
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
@@ -159,9 +175,11 @@ class MemoryStore:
         ).fetchall()
         return " ".join(r[0] for r in rows)
 
-    def list_dictionary(self) -> list[tuple[str, str, int]]:
+    def list_dictionary(self) -> list[tuple[str, str, int, int]]:
+        """全量词条 [(wrong, right, count, trusted)]，按是否生效 + 频次降序。"""
         return self._conn.execute(
-            "SELECT wrong, right, count FROM dictionary ORDER BY count DESC").fetchall()
+            """SELECT wrong, right, count, trusted FROM dictionary
+               ORDER BY trusted DESC, count DESC""").fetchall()
 
     # ---- 历史 ----
 

@@ -6,6 +6,7 @@
   python main.py dict add 错误词 正确词   手动加词条
   python main.py dict del 错误词 正确词   删词条
   python main.py style          提炼/查看风格画像（从用户编辑历史）
+  python main.py history        查看最近未上屏的内容
 """
 import argparse
 import logging
@@ -32,8 +33,13 @@ def _dict_cmd(args) -> None:
         if not rows:
             print("词典为空。改正上屏文本让其自动学习，或选中改好的文本按 Ctrl+Fn，"
                   "也可 dict add 手动添加。")
-        for wrong, right, count in rows:
-            print(f"  {wrong} → {right}  (×{count})")
+        active = store.mappings()  # count≥2 或手动添加
+        active_set = set(active)
+        print(f"生效中 {len(active)} 条，观察区 {len(rows) - len(active)} 条"
+              "（自动词条命中 2 次才生效）：")
+        for wrong, right, count, trusted in rows:
+            state = "手动" if trusted else ("生效" if (wrong, right) in active_set else "观察")
+            print(f"  [{state}] {wrong} → {right}  (×{count})")
         hw = store.hotwords()
         if hw:
             print(f"\n当前 ASR 热词（{len(hw)} 字）：{hw}")
@@ -54,7 +60,26 @@ def main() -> None:
     d.add_argument("wrong", nargs="?")
     d.add_argument("right", nargs="?")
     sub.add_parser("style", help="提炼/查看风格画像（从用户编辑历史）")
+    sub.add_parser("history", help="查看最近未上屏的内容")
     args = ap.parse_args()
+
+    if args.cmd == "history":
+        import yaml
+        from voice_input.memory import MemoryStore
+        config_path = Path(args.config).expanduser()
+        cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        db_path = Path(cfg.get("memory", {}).get("db", "data/memory.db")).expanduser()
+        if not db_path.is_absolute():
+            db_path = config_path.parent / db_path
+        store = MemoryStore(db_path)
+        rows = store._conn.execute(
+            "SELECT datetime(ts, 'unixepoch', 'localtime'), raw, polished FROM history "
+            "WHERE raw LIKE '[未上屏]%' ORDER BY id DESC LIMIT 10").fetchall()
+        for when, reason, content in rows:
+            print(f"{when} {reason}\n{content}\n")
+        if not rows:
+            print("没有未上屏的记录。")
+        return
 
     if args.cmd == "style":
         logging.basicConfig(level=logging.INFO,

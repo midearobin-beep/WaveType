@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 
 import Quartz
 from ApplicationServices import (
@@ -59,8 +60,8 @@ def ax_err(code: int) -> str:
 MESSAGING_TIMEOUT = 1.0   # 单次 AX 调用上限：目标 App 卡死时不能拖垮监听线程
 MAX_VALUE_CHARS = 50_000  # 超长文档截断（diff 成本保护）
 TEXT_ROLES = {"AXTextArea", "AXTextField", "AXComboBox", "AXSearchField"}
-MAX_WALK_DEPTH = 12       # Electron/Chromium 的输入框埋在 AXWebArea 之下好几层
-MAX_WALK_NODES = 300      # AX 树懒加载，遍历必须有上限
+MAX_WALK_DEPTH = 16       # Electron/Chromium 的输入框埋在 AXWebArea 之下好几层
+MAX_WALK_NODES = 600      # AX 树懒加载，遍历必须有上限（放宽以覆盖 IM/Electron 深树）
 
 
 # ---------- 基础封装 ----------
@@ -104,6 +105,20 @@ def frontmost_app_name() -> str:
         return app.localizedName() if app else ""
     except Exception:
         return ""
+
+
+def frontmost_window_title(pid: int | None = None) -> str:
+    """读取当前前台/焦点窗口的标题（如聊天对象名、网页标题、文档文件名）。"""
+    if pid is None:
+        pid = frontmost_pid()
+    if pid is None:
+        return ""
+    root, err = _focused_window(pid)
+    if root is not None:
+        title, _ = _attr(root, "AXTitle")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    return ""
 
 
 def _app_element(pid: int):
@@ -159,7 +174,7 @@ def _focused_window(pid: int | None):
 def _walk_text_fields(root) -> list[tuple[str, str, object]]:
     """广度优先收集子树里非空的文本框，返回 [(角色, 值, 元素)]。
 
-    上限：MAX_WALK_DEPTH 层 / MAX_WALK_NODES 个节点 / 每层最多 40 个子节点。
+    上限：MAX_WALK_DEPTH 层 / MAX_WALK_NODES 个节点 / 每层最多 60 个子节点。
     """
     hits: list[tuple[str, str, object]] = []
     queue = [(root, 0)]
@@ -176,7 +191,7 @@ def _walk_text_fields(root) -> list[tuple[str, str, object]]:
             continue
         kids, err = _attr(elem, kAXChildrenAttribute)
         if err == 0 and kids:
-            for kid in list(kids)[:40]:
+            for kid in list(kids)[:60]:
                 queue.append((kid, depth + 1))
     return hits
 
@@ -276,28 +291,40 @@ def _read_ax(pid: int | None = None) -> str | None:
 
 
 def _read_clipboard() -> str | None:
-    """模拟 Cmd+C 抢一次剪贴板，读完恢复原内容（只恢复纯文本）。"""
+    """模拟 Cmd+C 读取选区，并尽可能恢复原剪贴板各项内容。"""
     from AppKit import NSPasteboard
 
     pb = NSPasteboard.generalPasteboard()
-    old = pb.stringForType_("public.plain-text")
+    # 保留所有剪贴板类型，并用 changeCount 判断复制是否发生；无需先清空。
+    items = []
+    for item in pb.pasteboardItems() or []:
+        items.append({kind: item.dataForType_(kind) for kind in item.types()})
+    before = pb.changeCount()
     src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
-    # 先清空再 Cmd+C：否则选区内容恰好等于剪贴板旧内容（刚复制过这段是常态）
-    # 时，取到的值和旧值相同就会被误判成"没读到选区"，Ctrl+Fn 显得毫无反应。
-    pb.clearContents()
-    # Cmd down → C down → C up → Cmd up
     for key, down, flags in ((0x37, True, 0), (0x08, True, Quartz.kCGEventFlagMaskCommand),
                              (0x08, False, Quartz.kCGEventFlagMaskCommand), (0x37, False, 0)):
         ev = Quartz.CGEventCreateKeyboardEvent(src, key, down)
         if flags:
             Quartz.CGEventSetFlags(ev, flags)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
-    time.sleep(0.15)  # 等目标 App 把选区写进剪贴板
+    time.sleep(0.15)
+    copied_count = pb.changeCount()
+    if copied_count == before:
+        return None
     new = pb.stringForType_("public.plain-text")
-    # 恢复原剪贴板
-    if old is not None:
+    # 如果其他程序又更新了剪贴板，不覆盖其新内容。
+    if pb.changeCount() == copied_count:
+        from AppKit import NSPasteboardItem
+        restored = []
+        for representations in items:
+            item = NSPasteboardItem.alloc().init()
+            for kind, data in representations.items():
+                if data is not None:
+                    item.setData_forType_(data, kind)
+            restored.append(item)
         pb.clearContents()
-        pb.setString_forType_(old, "public.plain-text")
+        if restored:
+            pb.writeObjects_(restored)
     return str(new) if new else None
 
 
@@ -343,6 +370,94 @@ def _selected_range(elem) -> tuple[int, int] | None:
             return None
 
 
+@dataclass
+class InputTarget:
+    pid: int
+    app: str
+    element: object
+    selection_range: tuple[int, int] | None
+    value: str | None
+    window: object | None = None
+    window_title: str = ""
+
+
+def capture_input_target() -> InputTarget | None:
+    """记录当前真实焦点，不用树搜索猜测输入框。"""
+    pid = frontmost_pid()
+    if pid is None:
+        return None
+    w_title = frontmost_window_title(pid)
+    element, _ = focused_element(pid)
+    if element is None:
+        window, _ = _focused_window(pid)
+        if window is None or frontmost_pid() != pid:
+            log.info("无法确认输入焦点或窗口，保留结果供手动复制")
+            return None
+        log.info("无法读取焦点元素，使用前台窗口校验（pid=%s）", pid)
+        return InputTarget(pid, frontmost_app_name(), None, None, None, window, window_title=w_title)
+    if frontmost_pid() != pid:
+        return None
+    value, _ = _attr(element, "AXValue")
+    return InputTarget(pid, frontmost_app_name(), element, _selected_range(element),
+                       value if isinstance(value, str) else None, window_title=w_title)
+
+
+def input_target_matches(target: InputTarget | None, *, check_content: bool = True,
+                         inserted: str = "") -> bool:
+    """校验真实焦点及可读取的内容；缺失的 AX 属性不视为焦点变化。"""
+    if target is None or frontmost_pid() != target.pid:
+        return False
+    if target.element is None:
+        if target.window is None:
+            return False
+        window, _ = _focused_window(target.pid)
+        return window is not None and window == target.window and frontmost_pid() == target.pid
+    current, _ = focused_element(target.pid)
+    if current is None or current != target.element:
+        return False
+    if not check_content:
+        return True
+    value, _ = _attr(current, "AXValue")
+    current_range = _selected_range(current)
+    if not inserted:
+        return ((target.value is None or value == target.value)
+                and (target.selection_range is None or current_range == target.selection_range))
+    if target.selection_range is None:
+        # 无法推算输入后的文本或光标，只能校验焦点。
+        return True
+    location, length = target.selection_range
+    end = location + len(inserted.encode("utf-16-le")) // 2
+    if current_range != (end, 0):
+        return False
+    if target.value is None:
+        return True
+    data = target.value.encode("utf-16-le")
+    if location < 0 or length < 0 or (location + length) * 2 > len(data):
+        return False
+    try:
+        expected = (data[:location * 2] + inserted.encode("utf-16-le")
+                    + data[(location + length) * 2:]).decode("utf-16-le")
+    except UnicodeDecodeError:
+        return False
+    return value == expected
+
+
+def target_selected_text(target: InputTarget | None) -> str | None:
+    """AX 选区以 UTF-16 为单位；不能可靠解码时不允许替换。"""
+    if target is None or target.value is None or target.selection_range is None:
+        return None
+    location, length = target.selection_range
+    if location < 0 or length <= 0:
+        return None
+    data = target.value.encode("utf-16-le")
+    if (location + length) * 2 > len(data):
+        return None
+    try:
+        return data[location * 2:(location + length) * 2].decode("utf-16-le")
+    except UnicodeDecodeError:
+        return None
+
+
 def read_cursor_context(pid: int | None = None) -> dict:
     """读焦点输入框的光标上下文：{"before", "after", "selected", "role"}。
 
@@ -368,11 +483,15 @@ def read_cursor_context(pid: int | None = None) -> dict:
         # 误导模型把全文当成需要接续的内容）
         return ctx
     loc, length = rng
-    loc = max(0, min(loc, len(value)))
-    length = max(0, min(length, len(value) - loc))
-    ctx["before"] = value[:loc][-BEFORE_CHARS:]
-    ctx["after"] = value[loc + length:][:AFTER_CHARS]
-    ctx["selected"] = value[loc:loc + length]
+    data = value.encode("utf-16-le")
+    if loc < 0 or length < 0 or (loc + length) * 2 > len(data):
+        return ctx
+    try:
+        ctx["before"] = data[:loc * 2].decode("utf-16-le")[-BEFORE_CHARS:]
+        ctx["selected"] = data[loc * 2:(loc + length) * 2].decode("utf-16-le")
+        ctx["after"] = data[(loc + length) * 2:].decode("utf-16-le")[:AFTER_CHARS]
+    except UnicodeDecodeError:
+        return {"before": "", "after": "", "selected": "", "role": ctx["role"]}
     log.debug("光标上下文：前 %d 字 / 选 %d 字 / 后 %d 字",
               len(ctx["before"]), length, len(ctx["after"]))
     return ctx

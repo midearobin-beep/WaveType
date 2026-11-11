@@ -9,6 +9,14 @@ Fn 在 macOS 上不是普通按键，走 flagsChanged 事件，
 - Fn + Space    ：Ask 模式（点按进场，说话，点按 Fn 收尾）
 - Ctrl + Fn     ：纠错学习（读选区 → 学纠错对）
 
+备用触发键（alt_key）—— Fn 被系统层吞掉时的替代方案：
+- right_option  ：单击右侧 Option，等效「点按 Fn」开关口述
+- ctrl_double   ：连按两下左 Control
+- none / 省略   ：关闭
+macOS 27.2 beta 起，Fn 按下不再向 CG 事件系统上报 SecondaryFn
+（系统级采样恒为 0x100，flagsChanged 都不产生），所以需要备用键。
+备用键恒为点按 toggle，与 hotkey.mode 无关。
+
 实现注意：
 - Fn+Space 中的 Space 是普通按键（keyDown）。tap 必须订阅 keyDown/keyUp
   并**吞掉**这对事件（否则空格会漏进当前输入框），因此 tap 使用
@@ -33,8 +41,12 @@ log = logging.getLogger(__name__)
 _FN_FLAG = 0x800000    # kCGEventFlagMaskSecondaryFn
 _SHIFT_FLAG = 0x20000  # kCGEventFlagMaskShift
 _CTRL_FLAG = 0x40000   # kCGEventFlagMaskControl
+_ALT_FLAG = 0x80000    # kCGEventFlagMaskAlternate
+_CMD_FLAG = 0x100000   # kCGEventFlagMaskCommand
+_RIGHT_ALT_BIT = 0x40  # NX_DEVICERALTKEYMASK：右 Option 的设备位
 _SPACE_KEYCODE = 0x31
 _CHORD_GRACE_S = 0.6   # Fn 先落、Shift 后至的组合键纠错窗口
+_CTRL_DOUBLE_S = 0.45  # 连按两下 Ctrl 的间隔窗口
 
 
 class FnHotkey:
@@ -53,7 +65,8 @@ class FnHotkey:
                  on_correct: Callable[[], None] | None = None,
                  on_cancel: Callable[[], None] | None = None,
                  translate_enabled: bool = True,
-                 ask_enabled: bool = True) -> None:
+                 ask_enabled: bool = True,
+                 alt_key: str | None = None) -> None:
         self._on_press = on_press
         self._on_release = on_release
         self._on_correct = on_correct
@@ -63,6 +76,11 @@ class FnHotkey:
         self._ask_enabled = ask_enabled
         self._fn_down = False
         self._shift_down = False
+        # 备用触发键：Fn 拿不到事件时的替代入口
+        self._alt_hotkey = (alt_key or "").strip().lower() or None
+        self._right_alt_down = False
+        self._ctrl_down = False
+        self._last_ctrl_tap = 0.0
         self._active: str | None = None    # 当前录音模式（None = 空闲）
         self._active_since = 0.0           # 当前模式启动时刻（chord 纠错窗口用）
         self._space_swallowed = False      # Fn+Space 的 keyUp 也要一并吞掉
@@ -130,6 +148,10 @@ class FnHotkey:
         ctrl = bool(flags & _CTRL_FLAG)
         log.debug("flagsChanged flags=%#x fn=%s shift=%s", flags, fn, shift)
 
+        # 备用触发键（Fn 被系统层吞掉时唯一入口）
+        if self._alt_hotkey:
+            self._check_alt_hotkey(flags)
+
         # Shift 按下沿（Fn 已按住）：
         if shift and not self._shift_down and fn and self._translate_enabled:
             if self._active is None:
@@ -161,6 +183,45 @@ class FnHotkey:
         self._shift_down = shift
 
     # ---------- 模式状态机 ----------
+
+    def _check_alt_hotkey(self, flags: int) -> None:
+        """备用触发键：恒为点按 toggle（"按住说话"对修饰键不适用）。
+
+        与其他修饰键同按时不触发，避免干扰 Option / Ctrl 的正常组合键。
+        """
+        ctrl = bool(flags & _CTRL_FLAG)
+        shift = bool(flags & _SHIFT_FLAG)
+        alt = bool(flags & _ALT_FLAG)
+        cmd = bool(flags & _CMD_FLAG)
+        right_alt = bool(flags & _RIGHT_ALT_BIT)
+
+        if self._alt_hotkey == "right_option":
+            if right_alt and not self._right_alt_down:
+                self._right_alt_down = True
+                if not (ctrl or shift or cmd):
+                    self._toggle()
+            elif not right_alt:
+                self._right_alt_down = False
+
+        elif self._alt_hotkey == "ctrl_double":
+            if ctrl and not self._ctrl_down:
+                self._ctrl_down = True
+                now = time.monotonic()
+                if (now - self._last_ctrl_tap <= _CTRL_DOUBLE_S
+                        and not (alt or shift or cmd)):
+                    self._last_ctrl_tap = 0.0
+                    self._toggle()
+                else:
+                    self._last_ctrl_tap = now
+            elif not ctrl:
+                self._ctrl_down = False
+
+    def _toggle(self) -> None:
+        """点按开关：空闲 → 开始口述；录音中 → 收尾走管线。"""
+        if self._active is None:
+            self._start("dictate")
+        else:
+            self._finish()
 
     def _start(self, mode: str) -> None:
         if self._active is not None:
@@ -209,8 +270,9 @@ class FnHotkey:
         self._loop = loop
         Quartz.CFRunLoopAddSource(loop, source, Quartz.kCFRunLoopCommonModes)
         Quartz.CGEventTapEnable(self._tap, True)
-        log.info("热键监听已启动（mode=%s, translate=%s, ask=%s）",
-                 self._mode, self._translate_enabled, self._ask_enabled)
+        log.info("热键监听已启动（mode=%s, translate=%s, ask=%s, alt=%s）",
+                 self._mode, self._translate_enabled, self._ask_enabled,
+                 self._alt_hotkey or "无")
         Quartz.CFRunLoopRun()
 
     def stop(self) -> None:

@@ -24,9 +24,9 @@
 - **Plain-text lists** — spoken enumerations become `1. 2. 3.` numbered lists with Tab indentation. No Markdown symbols leaking into your input fields — *unless* the target supports it: in Markdown-capable apps (Obsidian, Typora, Notion, 飞书… configurable via `markdown_apps`) lists and **bold** are emitted natively
 - **Cursor context awareness** — the polisher sees the text around your cursor (read at recording start via AX): replies don't re-greet the sender, enumerations continue the preceding list's numbering, and a leading punctuation dedup rule prevents `。。` seams at the junction
 - **Voice commands** — a whole-utterance match like `换行`, `撤销`, `全选`, `保存` sends the keystroke directly (never reaches the LLM); `换行换行` presses Return twice. Disable with `commands: false`
-- **Style profile** — every edit you make after injection is logged locally (`style_edits` table); once enough samples accumulate, a local distillation pass (`python3 main.py style`, or automatic) summarizes abstract preferences ("聊天：偏好短句") — never the raw content — and injects them into the polish prompt. Typeless's `/user/traits`, fully on-device. Disable with `style.enabled: false`
+- **Style profile** — edits are stored locally and sent to the configured LLM for distillation, automatically or with `python3 main.py style`. A cloud provider receives excerpts of both the original and edited text; the prompt requests abstract preferences but cannot guarantee the model omits original text. Disable automatic distillation with `style.enabled: false`.
 - **Deterministic dictionary layer** — beyond ASR hotwords + LLM prompt constraints, learned pairs are also hard-applied as a final regex/substring pass (FluidVoice-style), so "LLM ignored the dictionary" can no longer leak through. `llm.hard_apply_dict: false` to opt out
-- **Menu bar icon** — WaveType lives in the menu bar: recording status dot, dictionary/style stats, quick access to `config.yaml`, and Quit
+- **Menu bar icon** — a monochrome speech bubble with a voice waveform adapts to the menu bar; a dot indicates recording. The menu offers dictionary/style stats, quick access to `config.yaml`, and Quit
 - **Anti-hallucination guardrails** — fidelity-first prompt (deliberate repetition and courtesy words are kept, per FluidVoice's rules) + repetition-loop detection + length-ratio fallback to raw ASR output (relaxed automatically for mid-speech corrections and enumerations)
 
 ## 🎬 Demo
@@ -72,7 +72,10 @@ python3 main.py              # start
 python3 main.py --settings   # settings GUI: model / API key / token usage
 python3 main.py --raw        # skip LLM cleanup, raw ASR output
 python3 main.py -v           # debug logs
+python3 main.py history      # recover the most recent results that were not typed
 ```
+
+Before typing or executing a voice command, WaveType checks that the original app, input field, text and selection still match. When the target changes or available text and selection details no longer match, typing stops and the remaining text is shown in a card and saved in local history. Some apps do not expose text or selection through Accessibility; in those apps only the available details and the focused app and field can be checked. If the field itself is unavailable but the focused window is available, WaveType checks the app and window only; it cannot detect a move between fields in that window. Switching focus during a long output can leave a partial insertion. Processing times for queueing, ASR, LLM and typing are logged; the configured dictionary and cloud provider can affect latency. Numbered-list detection is a best-effort format check, not a guarantee of factual completeness.
 
 | Gesture | Action |
 |---|---|

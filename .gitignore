@@ -8,6 +8,7 @@ config.yaml
 .env
 data/
 *.db
+词典/
 
 # 工作区与文档草稿
 .workbuddy/

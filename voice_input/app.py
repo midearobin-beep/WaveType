@@ -15,6 +15,7 @@ import logging
 import queue
 import signal
 import threading
+import time
 from pathlib import Path
 
 import yaml
@@ -28,10 +29,36 @@ from .learn import extract_wrong
 from .memory import MemoryStore
 from .polish import MARKDOWN_APPS, Polisher
 from .recorder import Recorder
-from .selection import (frontmost_app_name, frontmost_pid, read_cursor_context,
-                        read_selected_text)
+from .selection import (capture_input_target, frontmost_pid, input_target_matches,
+                        read_cursor_context, read_selected_text, target_selected_text)
 
 log = logging.getLogger(__name__)
+
+
+def _load_dict_files(config_dir: Path, files: list[str]) -> list[str]:
+    """加载私人术语表文件（一行一个术语，# 开头为注释），去重保序。
+
+    与 memory.db 的纠错对不同：这里是"正确写法"纯术语，没有错误形式，
+    用于 ASR 热词偏置和 LLM 术语表，不参与 wrong→right 硬替换。
+    """
+    terms: list[str] = []
+    seen: set[str] = set()
+    for f in files or []:
+        p = Path(f).expanduser()
+        if not p.is_absolute():
+            p = config_dir / p
+        if not p.is_file():
+            log.warning("术语表文件不存在: %s", p)
+            continue
+        for line in p.read_text(encoding="utf-8").splitlines():
+            t = line.strip()
+            if not t or t.startswith("#") or t in seen:
+                continue
+            seen.add(t)
+            terms.append(t)
+    if terms:
+        log.info("私人术语表：%d 词（%d 个文件）", len(terms), len(files))
+    return terms
 
 
 class VoiceInputApp:
@@ -58,20 +85,30 @@ class VoiceInputApp:
         self._usage = UsageLogger(db_path)
         self._polisher.set_usage_logger(self._usage)
         self._max_hotwords = mem_cfg.get("max_hotwords", 80)
+        # 私人术语表（asr.dict_files，一行一词）：合并进 ASR 热词偏置与 LLM 术语表。
+        # 文件须 gitignore（私人内容不进公开版本）。
+        asr_cfg = cfg.get("asr", {})
+        self._static_terms = _load_dict_files(config_path.parent,
+                                              asr_cfg.get("dict_files", []))
+        self._max_context_terms = int(asr_cfg.get("max_context_terms", 0))
         self._hud_enabled = cfg.get("hud", {}).get("enabled", True)
         self._hud = None
         self._queue: queue.Queue = queue.Queue()
         modes_cfg = cfg.get("modes", {})
+        hotkey_cfg = cfg.get("hotkey", {})
+        self._alt_key_cfg = (hotkey_cfg.get("alt_key") or "").strip().lower()
         self._hotkey = FnHotkey(self._on_press, self._on_release,
-                                mode=cfg.get("hotkey", {}).get("mode", "hold"),
+                                mode=hotkey_cfg.get("mode", "hold"),
                                 on_correct=self._on_correct,
                                 on_cancel=self._on_cancel,
                                 translate_enabled=modes_cfg.get("translate", True),
-                                ask_enabled=modes_cfg.get("ask", True))
+                                ask_enabled=modes_cfg.get("ask", True),
+                                alt_key=self._alt_key_cfg)
         self._mode = "dictate"          # 当前录音模式
         self._ask_context = None        # Ask 进场时捕获的选区文本
         # P0 光标上下文：听写进场时捕获（焦点还在目标应用），收尾时随音频入队
         self._cursor_ctx = {"before": "", "after": ""}
+        self._input_target = None
         # P2 语音命令（换行/撤销/保存…，整句命中直接发按键）
         self._commands_enabled = cfg.get("commands", True)
         # P1a 支持 Markdown 的 App（内置集合 + 配置追加）
@@ -84,7 +121,7 @@ class VoiceInputApp:
         self._last_polished = ""
         self._statusbar = None          # run() 里创建（菜单栏图标）
         self._quit = False
-        self._autolearn = AutoLearner(self._memory, self._on_learned) \
+        self._autolearn = AutoLearner(self._memory, self._on_learned, static_terms=self._static_terms) \
             if cfg.get("autolearn", {}).get("enabled", True) else None
 
     def _on_learned(self, wrong: str, right: str) -> None:
@@ -116,13 +153,15 @@ class VoiceInputApp:
 
     def _on_press(self, mode: str = "dictate") -> None:
         self._mode = mode
+        self._input_target = capture_input_target()
+        pid = self._input_target.pid if self._input_target else frontmost_pid()
         # Ask：进场时即捕获选区（编辑指令要替换的就是这段文本）。
         # 趁焦点还在目标应用、选区完整时读取，收尾时直接用。
-        self._ask_context = read_selected_text(frontmost_pid()) if mode == "ask" else None
+        self._ask_context = read_selected_text(pid) if mode == "ask" else None
         # P0：口述/翻译进场时捕获光标上下文（上文/下文），供润色衔接。
         # 趁焦点还在目标应用读取——收尾时用户可能已切窗口。
         if mode in ("dictate", "translate"):
-            self._cursor_ctx = read_cursor_context(frontmost_pid())
+            self._cursor_ctx = read_cursor_context(pid)
         else:
             self._cursor_ctx = {"before": "", "after": ""}
         if self._autolearn is not None:
@@ -140,6 +179,8 @@ class VoiceInputApp:
         audio = self._recorder.stop()
         context, self._ask_context = self._ask_context, None
         cursor_ctx, self._cursor_ctx = self._cursor_ctx, {"before": "", "after": ""}
+        cursor_ctx["target"], self._input_target = self._input_target, None
+        cursor_ctx["queued_at"] = time.monotonic()
         if self._statusbar is not None:
             from PyObjCTools import AppHelper
             AppHelper.callAfter(self._statusbar.set_recording, False, mode)
@@ -165,6 +206,7 @@ class VoiceInputApp:
         """Fn 先落的 Fn+Shift chord：口述刚启动即作废，改走翻译。"""
         self._recorder.stop()  # 丢弃这段刚开始的录音
         self._ask_context = None
+        self._input_target = None
         log.info("口述已取消（升级为翻译模式）")
 
     def _hide_hud(self) -> None:
@@ -204,7 +246,10 @@ class VoiceInputApp:
                     continue
                 if self._asr is None:
                     from .asr import ASR
-                    self._asr = ASR(**self._cfg["asr"])
+                    # 只传 ASR 认识的键：dict_files / max_context_terms 是 app 层配置
+                    asr_init = {k: v for k, v in self._cfg["asr"].items()
+                                if k in ("model", "language", "context")}
+                    self._asr = ASR(**asr_init)
                     self._refresh_dictionary()
                 if mode == "_warmup":
                     # 启动预热：一小段静音过一遍转写，让 MLX 完成编译与缓存，
@@ -220,14 +265,22 @@ class VoiceInputApp:
         if self._asr is None:
             return
         hw = self._memory.hotwords(limit=self._max_hotwords)
+        # 静态术语表（私人词典文件）+ 动态学习热词合并注入 ASR 偏置
+        terms = self._static_terms
+        if self._max_context_terms > 0:
+            terms = terms[: self._max_context_terms]
+        ctx = " ".join(part for part in (" ".join(terms), hw) if part)
         # 空串也要下发：否则把词典删空后，热词会一直残留到下次重启
-        self._asr.set_context(hw)
+        self._asr.set_context(ctx)
         maps = self._memory.mappings()
         self._polisher.set_dictionary(maps)
+        # 术语表进 LLM prompt（软约束，不参与 wrong→right 硬替换）
+        self._polisher.set_terms(self._static_terms)
         # P1b：风格画像随词典一起回注（没有画像时为空串，prompt 不出现该块）
         profile = self._memory.style_profile()
         self._polisher.set_style_profile(profile)
-        log.info("词典已回注（热词 %d 字，映射 %d 条）", len(hw), len(maps))
+        log.info("词典已回注（术语表 %d 词，热词 %d 字，映射 %d 条）",
+                 len(self._static_terms), len(ctx), len(maps))
         if self._statusbar is not None:
             from PyObjCTools import AppHelper
             AppHelper.callAfter(self._statusbar.set_stats,
@@ -258,14 +311,17 @@ class VoiceInputApp:
 
     def _process(self, audio, mode: str = "dictate", context: str | None = None,
                  cursor_ctx: dict | None = None) -> None:
-        # 目标应用在注入前就固定下来：后面自动学习要用它做归属校验，
-        # 不能用"读回时"的前台应用（那时用户可能已经切走了）
-        app, pid = frontmost_app_name(), frontmost_pid()
         ctx = cursor_ctx or {"before": "", "after": ""}
+        target = ctx.get("target")
+        app, pid = (target.app, target.pid) if target else ("", None)
+        window_title = target.window_title if target else ""
         before, after = ctx.get("before", ""), ctx.get("after", "")
         markdown = self._supports_markdown(app)
         self._stage_label("Transcribing")  # ASR 阶段（首次含模型加载）
+        started = time.monotonic()
+        log.info("管线排队 %.2fs", started - ctx.get("queued_at", started))
         text = self._asr.transcribe(audio)
+        log.info("识别耗时 %.2fs", time.monotonic() - started)
         if not text:
             # VAD 听到了声音但 ASR 转写为空（说得太轻/太晚/纯噪音）：
             # 必须留日志——静默丢弃会让排障无从下手
@@ -280,24 +336,36 @@ class VoiceInputApp:
             hit = match_command(text)
             if hit:
                 word, times = hit
+                if not input_target_matches(target, check_content=(word != "保存")):
+                    self._retain_result(text, app, "焦点或内容已变化，语音命令未执行")
+                    return
                 exec_command(word, times)
                 self._memory.log_history(f"[命令] {text}", f"{word}×{times}", app)
                 self._hide_hud()
                 return
 
         if mode == "translate":
-            final = self._polisher.translate(text, app=app, before=before,
-                                             after=after, markdown=markdown)
-            type_text(final, **self._inject_cfg)
+            started = time.monotonic()
+            final = self._polisher.translate(text, app=app, window_title=window_title,
+                                             before=before, after=after, markdown=markdown)
+            log.info("翻译耗时 %.2fs", time.monotonic() - started)
+            if not self._safe_type(final, target, app):
+                return
             self._memory.log_history(f"[翻译] {text}", final, app)
             self._hide_hud()
             return
 
         if mode == "ask":
-            action, content = self._polisher.ask(text, context, app=app)
+            started = time.monotonic()
+            action, content = self._polisher.ask(text, context, app=app, window_title=window_title)
+            log.info("问答耗时 %.2fs", time.monotonic() - started)
             if action == "edit" and context:
                 # 编辑指令：选区仍在焦点应用里保持选中，直接打字即整体替换
-                type_text(content, **self._inject_cfg)
+                if target_selected_text(target) != context:
+                    self._retain_result(content, app, "无法确认原始选区，未替换")
+                    return
+                if not self._safe_type(content, target, app):
+                    return
                 self._memory.log_history(f"[改写] {text}", content, app)
                 self._hide_hud()
             elif content:
@@ -312,13 +380,16 @@ class VoiceInputApp:
             return
 
         # dictate：ASR → 润色（带光标上下文）→ 上屏
-        final = self._polisher.polish(text, app=app, before=before,
-                                      after=after, markdown=markdown)
+        started = time.monotonic()
+        final = self._polisher.polish(text, app=app, window_title=window_title,
+                                      before=before, after=after, markdown=markdown)
+        log.info("润色耗时 %.2fs", time.monotonic() - started)
         if not final:
             # 润色层判定"无实义内容"（整句都是口水词）：不上屏、不入历史
             self._hide_hud()
             return
-        type_text(final, **self._inject_cfg)
+        if not self._safe_type(final, target, app):
+            return
         self._last_raw, self._last_polished = text, final
         self._memory.log_history(text, final, app)
         if self._autolearn is not None:
@@ -326,6 +397,25 @@ class VoiceInputApp:
             # 避免切窗口后把另一个输入框的内容当成"用户改了这段"。
             self._autolearn.watch(final, app=app, pid=pid)
         self._hide_hud()
+
+    def _retain_result(self, text: str, app: str, reason: str) -> None:
+        log.warning("%s；结果保存在历史记录", reason)
+        self._memory.log_history("[未上屏] " + reason, text, app)
+        self._hide_hud()
+        self._notify(reason + "，结果已保存到历史记录")
+        self._show_card(text, title="未上屏的内容")
+
+    def _safe_type(self, text: str, target, app: str) -> bool:
+        started = time.monotonic()
+        remaining = type_text(text, **self._inject_cfg,
+                              can_type=lambda inserted: input_target_matches(
+                                  target, inserted=inserted))
+        log.info("上屏耗时 %.2fs", time.monotonic() - started)
+        if remaining:
+            reason = "焦点或内容已变化，停止上屏" if remaining == text else "焦点已变化，部分内容未上屏"
+            self._retain_result(remaining, app, reason)
+            return False
+        return True
 
     def _show_card(self, text: str, title: str = "Ask") -> None:
         """主线程展示答案卡片。"""
@@ -388,4 +478,9 @@ class VoiceInputApp:
         print("    Fn + Shift  中英互译（点按进场，Fn 收尾）")
         print("    Fn + Space  语音问答（选中文本时可语音编辑）")
         print("    Ctrl + Fn   纠错学习 · Ctrl+C 退出")
+        _alt = self._alt_key_cfg
+        if _alt == "right_option":
+            print("    ⌥（右）     备用口述键：单击开始 / 再单击收尾")
+        elif _alt == "ctrl_double":
+            print("    ⌃⌃          备用口述键：连按两下左 Control")
         AppHelper.runEventLoop()

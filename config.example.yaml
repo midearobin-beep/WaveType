@@ -5,6 +5,8 @@ asr:
   # 更省内存的备选：mlx-community/Qwen3-ASR-1.7B-5bit / Qwen3-ASR-0.6B-5bit
   language: auto          # auto / Chinese / English ...（中英混说保持 auto）
   context: ""             # ASR 热词（个人词典会自动注入，一般留空）
+  dict_files: []          # 私人术语表文件（一行一词，路径相对本配置；词表文件本身勿提交）
+  max_context_terms: 0    # 注入 ASR 的静态术语上限，0=全量
 
 llm:
   # 二选一：
@@ -23,6 +25,7 @@ llm:
   # keep_alive: 30m               # 延长驻留，避免闲置后首句等 30s
   enabled: true           # false = 直通 ASR 原文（--raw 等效）
   hard_apply_dict: true   # 确定性词典层：输出再过一遍 wrong→right 硬替换（≥2 字词条）
+  ask_max_tokens: 4096    # 长选区超出安全输出预算时提示分段，避免截断后替换原文
 
 inject:
   chars_per_second: 60    # 逐字打字速度（非流式：模型处理完一次性打出）
@@ -31,6 +34,10 @@ inject:
 hotkey:
   key: fn                 # fn
   mode: toggle            # toggle=按一下开始、再按一下结束（然后开始 Thinking 处理）
+  # 备用触发键（Fn 拿不到事件时的替代入口，恒为点按开关）：
+  #   right_option = 单击右侧 Option ｜ ctrl_double = 连按两下左 Control ｜ none = 关闭
+  # macOS 27.2 beta 起 Fn 按下不再产生 CG 事件，需要靠这个键触发。
+  alt_key: right_option
   # 纠错手势：选中你改正后的文本，按住 Ctrl 点按 Fn → 学习纠错对
 
 modes:
@@ -42,7 +49,7 @@ commands: true            # 语音命令：整句"换行/撤销/全选/保存…
 # 内置：Obsidian/Bear/Typora/Notion/Craft/Logseq/语雀/飞书/Lark/Code/Cursor
 markdown_apps: []
 
-# 风格画像：从你对上屏文本的手动编辑中提炼抽象偏好（不含原文），注入润色 prompt
+# 风格画像：提炼会向配置的 LLM 发送编辑前后的文本片段；云端模型会接收这些内容。
 style:
   enabled: true
   min_samples: 8          # 攒够 8 条编辑才提炼；之后每多 8 条自动重新提炼

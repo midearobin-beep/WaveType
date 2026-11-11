@@ -1,7 +1,7 @@
 """菜单栏图标（NSStatusBar）：运行状态 + 快捷入口。
 
-- 常驻菜单栏麦克风图标（assets/icon.png，template 渲染，深浅色自适应）
-- 录音时图标旁显示红点 + 模式名（听写/翻译/问答）
+- 常驻菜单栏语音气泡图标，template 渲染，深浅色自适应
+- 录音时图标旁显示单色圆点；菜单中显示模式名（听写/翻译/问答）
 - 菜单：状态 / 词典与风格画像统计 / 打开配置文件 / 退出
 
 必须在主线程创建（NSApplication 就绪后）；所有更新经 AppHelper.callAfter
@@ -17,35 +17,49 @@ log = logging.getLogger(__name__)
 _MODE_LABEL = {"dictate": "听写中", "translate": "翻译中", "ask": "问答中"}
 
 
-def _make_sine_image(size: int = 18):
-    """程序绘制的正弦波菜单栏图标：一个完整周期，圆头线，template 渲染。
-
-    不依赖 assets 里的文件，深浅色菜单栏都由系统取色。
-    """
-    import math
-
+def _make_voice_image(size: int = 18):
+    """语音波形置于对话气泡中；使用 template 跟随系统菜单栏颜色。"""
     from AppKit import NSBezierPath, NSColor, NSImage
     from Foundation import NSPoint, NSSize
 
     image = NSImage.alloc().initWithSize_(NSSize(size, size))
     image.lockFocus()
     try:
+        scale = size / 18.0
+        point = lambda x, y: NSPoint(x * scale, y * scale)
+        NSColor.blackColor().setStroke()
+
+        # 圆角对话气泡及一笔连成的尾巴，在 18 pt 下保留足够的留白。
         path = NSBezierPath.bezierPath()
-        path.setLineWidth_(1.8)
-        path.setLineCapStyle_(1)   # 圆头
-        path.setLineJoinStyle_(1)  # 圆角连接
-        amp = size * 0.30          # 振幅：波峰波谷不贴边
-        mid = size / 2.0
-        steps = size * 2           # 采样够密，曲线才平滑
-        for i in range(steps + 1):
-            x = size * i / steps
-            y = mid + amp * math.sin(2 * math.pi * i / steps)
-            if i == 0:
-                path.moveToPoint_(NSPoint(x, y))
-            else:
-                path.lineToPoint_(NSPoint(x, y))
-        NSColor.blackColor().setStroke()  # template 模式下颜色被系统接管
+        path.setLineWidth_(1.45 * scale)
+        path.setLineCapStyle_(1)
+        path.setLineJoinStyle_(1)
+        path.moveToPoint_(point(5.8, 4.2))
+        path.lineToPoint_(point(3.3, 2.3))
+        path.lineToPoint_(point(3.3, 4.4))
+        path.curveToPoint_controlPoint1_controlPoint2_(
+            point(1.9, 6.2), point(2.4, 4.6), point(1.9, 5.2))
+        path.lineToPoint_(point(1.9, 12.5))
+        path.curveToPoint_controlPoint1_controlPoint2_(
+            point(4.4, 15.0), point(1.9, 13.9), point(3.0, 15.0))
+        path.lineToPoint_(point(13.6, 15.0))
+        path.curveToPoint_controlPoint1_controlPoint2_(
+            point(16.1, 12.5), point(15.0, 15.0), point(16.1, 13.9))
+        path.lineToPoint_(point(16.1, 6.7))
+        path.curveToPoint_controlPoint1_controlPoint2_(
+            point(13.6, 4.2), point(16.1, 5.3), point(15.0, 4.2))
+        path.closePath()
         path.stroke()
+
+        # 三个圆头竖线既是声音波形，也暗示语音转为文字。
+        wave = NSBezierPath.bezierPath()
+        wave.setLineWidth_(1.55 * scale)
+        wave.setLineCapStyle_(1)
+        for x, bottom, top in ((6.0, 8.1, 10.4), (9.0, 6.8, 11.7),
+                               (12.0, 8.1, 10.4)):
+            wave.moveToPoint_(point(x, bottom))
+            wave.lineToPoint_(point(x, top))
+        wave.stroke()
     finally:
         image.unlockFocus()
     image.setTemplate_(True)
@@ -54,7 +68,7 @@ def _make_sine_image(size: int = 18):
 
 class StatusBarController:
     def __init__(self, config_path: Path) -> None:
-        from AppKit import (NSImage, NSMenu, NSMenuItem, NSStatusBar,
+        from AppKit import (NSMenu, NSMenuItem, NSStatusBar,
                             NSVariableStatusItemLength)
 
         self._config_path = Path(config_path)
@@ -64,7 +78,7 @@ class StatusBarController:
         self._item = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSVariableStatusItemLength)
         button = self._item.button()
-        button.setImage_(_make_sine_image())
+        button.setImage_(_make_voice_image())
         button.setToolTip_("WaveType 语音输入")
 
         self._menu = NSMenu.alloc().init()
@@ -118,11 +132,11 @@ class StatusBarController:
         self._recording = recording
         self._mode = mode
         label = _MODE_LABEL.get(mode, "听写中") if recording else "空闲"
-        dot = "🔴 " if recording else ""
+        dot = " •" if recording else ""
         self._status_item.setTitle_(f"状态：{label}")
         button = self._item.button()
         if button is not None:
-            button.setTitle_(dot)  # 有图标时红点叠在图标旁；无图标时替代 🎙
+            button.setTitle_(dot)
 
     def set_stats(self, dict_count: int, style_on: bool) -> None:
         profile = " · 风格画像已启用" if style_on else ""

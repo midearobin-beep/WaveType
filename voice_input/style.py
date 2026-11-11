@@ -1,12 +1,12 @@
-"""风格画像提炼（P1b，对标 Typeless /user/traits，全本地）。
+"""风格画像提炼（P1b，对标 Typeless /user/traits）。
 
 链路：
 1. autolearn 把用户对上屏文本的每次稳定编辑写进 memory.style_edits
 2. 本模块定期（或手动 `python main.py style`）从最近编辑中提炼抽象偏好
 3. 画像写回 style_traits，由 app 层注入润色 prompt（STYLE_TEMPLATE）
 
-隐私口径与 Typeless 一致：画像只含抽象描述（"聊天类偏好短句"），
-不含任何原文内容。提炼调用 LLM 时素材用标签包裹，与润色同款防注入。
+提炼时编辑前后的文本片段会发送给所配置的 LLM；云端后端会上传这些片段。
+提示词要求画像只含抽象描述，但不能保证模型一定不会输出原文。
 """
 from __future__ import annotations
 

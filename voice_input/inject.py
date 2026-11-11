@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
 import Quartz
 
@@ -35,26 +36,30 @@ def _post_text(s: str) -> None:
     src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
     for down in (True, False):
         ev = Quartz.CGEventCreateKeyboardEvent(src, 0, down)
-        Quartz.CGEventKeyboardSetUnicodeString(ev, len(s), s)
+        Quartz.CGEventKeyboardSetUnicodeString(ev, len(s.encode("utf-16-le")) // 2, s)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
 
 
-def type_text(text: str, chars_per_second: float = 40.0, initial_delay_ms: int = 50) -> None:
-    """把 text 逐字"打"进当前焦点输入框。"""
+def type_text(text: str, chars_per_second: float = 40.0, initial_delay_ms: int = 50,
+              can_type: Callable[[str], bool] | None = None) -> str:
+    """向焦点输入；焦点变化时停止并返回尚未输入的文本。"""
     if not text:
-        return
+        return ""
     time.sleep(initial_delay_ms / 1000.0)
     blocks = _chunks(text)
     interval = _MAX_UNICHARS / max(chars_per_second, 1.0)
     t0 = time.monotonic()
     for i, block in enumerate(blocks):
+        if can_type is not None and not can_type("".join(blocks[:i])):
+            return "".join(blocks[i:])
         _post_text(block)
         # 匀速节流：按字符数对齐目标速度，避免长文本越打越快
         target = t0 + (i + 1) * interval
         delay = target - time.monotonic()
-        if delay > 0:
+        if delay > 0 and i + 1 < len(blocks):
             time.sleep(delay)
     log.info("注入完成: %d 字 (%.1fs)", len(text), time.monotonic() - t0)
+    return ""
 
 
 if __name__ == "__main__":
