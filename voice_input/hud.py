@@ -599,8 +599,11 @@ class AnswerCardController(NSObject):
     # ---------- 对外（主线程） ----------
 
     def showAnswer_withTitle_(self, answer: str, title: str = "Ask") -> None:
-        from AppKit import NSFont, NSFontAttributeName
-        from Foundation import NSString
+        from AppKit import (NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
+                            NSLinkAttributeName)
+        from Foundation import (NSDataDetector, NSMakeRange, NSMutableAttributedString,
+                                NSString, NSTextCheckingTypeLink)
+        from .polish import ASK_SOURCES_HEADING
         # 用 NSString 精确测量多行文本高度
         font = NSFont.systemFontOfSize_(13.0)
         rect = NSString.stringWithString_(answer).boundingRectWithSize_options_attributes_(
@@ -621,7 +624,20 @@ class AnswerCardController(NSObject):
         self._title.setStringValue_(title)
         self._close.setFrame_(Quartz.CGRectMake(self.CARD_WIDTH - 34, card_h - 30, 22, 22))
         self._scroll.setFrame_(Quartz.CGRectMake(20, 44, self.TEXT_WIDTH, text_h))
-        self._text.setString_(answer)
+        attributes = {NSFontAttributeName: font,
+                      NSForegroundColorAttributeName: self._text.textColor()}
+        rich_text = NSMutableAttributedString.alloc().initWithString_attributes_(answer, attributes)
+        source_prefix, source_heading, _sources = answer.rpartition(ASK_SOURCES_HEADING)
+        if title == "Ask" and source_heading:
+            detector, _error = NSDataDetector.dataDetectorWithTypes_error_(NSTextCheckingTypeLink, None)
+            if detector is not None:
+                start = NSString.stringWithString_(source_prefix + source_heading).length()
+                source_range = NSMakeRange(start, rich_text.length() - start)
+                for match in detector.matchesInString_options_range_(answer, 0, source_range):
+                    url = match.URL()
+                    if url is not None and url.scheme() in {"http", "https"}:
+                        rich_text.addAttribute_value_range_(NSLinkAttributeName, url, match.range())
+        self._text.textStorage().setAttributedString_(rich_text)
         self._text.setFrame_(Quartz.CGRectMake(0, 0, self.TEXT_WIDTH, max(text_h, rect.size.height + 8)))
         self._copy.setFrame_(Quartz.CGRectMake(self.CARD_WIDTH - 80, 12, 60, 22))
         self._copy.setTitle_("复制")

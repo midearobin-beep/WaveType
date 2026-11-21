@@ -122,11 +122,15 @@ do_uninstall() {
 
 do_restart() {
   say "== 重启 ${LABEL}（改完 config.yaml 用这个）=="
-  if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    launchctl kickstart -k "$DOMAIN/$LABEL" || return 1
+  elif [ -f "$PLIST_DST" ]; then
+    # 菜单退出只卸载服务，安装文件仍在。bootstrap 会按 RunAtLoad 启动。
+    launchctl bootstrap "$DOMAIN" "$PLIST_DST" || return 1
+  else
     say "服务未安装，先跑：bash deploy/launchagent.sh install"
     exit 1
   fi
-  launchctl kickstart -k "$DOMAIN/$LABEL"
   ok "已重启"
 }
 

@@ -2,24 +2,28 @@
 """WaveType 设置界面（PyObjC 原生 GUI）。
 
 一块窗口搞定日常设置：
-- 润色模型：云端 OpenAI 兼容 API（base_url / model / key + 测试连接）
-            或本地 Ollama（模型下拉自动取 ollama list / keep_alive）
+- 润色模型：云端 OpenAI 兼容 API 或本地 Ollama
+- 翻译输出：可选择常用语言或输入语言名称，默认俄语
+- Ask 联网搜索：仅 DeepSeek Flash 云端模型可用
 - Token 用量：今日 / 累计 / 按功能（润色、翻译、问答）分项统计
 
-保存写回 config.yaml 的 llm 段（精准替换，保留其余内容与注释）；
+保存写回 config.yaml 的 llm、translation 与 Ask 联网搜索设置（精准替换，保留其余内容与注释）；
 API key 只写 .env，绝不进 config.yaml。
 
 运行：python main.py --settings   或   python settings_gui.py
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import objc
+import yaml
 from AppKit import (
     NSApplication,
     NSBackingStoreBuffered,
@@ -38,13 +42,13 @@ from AppKit import (
 )
 from Foundation import NSObject
 
+from voice_input.polish import TRANSLATE_LANGUAGE_LABELS, translation_target
+
 ROOT = Path(__file__).resolve().parent
-WIN_W, WIN_H = 560.0, 620.0
+WIN_W, WIN_H = 560.0, 800.0
 
 _GRAY = NSColor.colorWithCalibratedWhite_alpha_(0.55, 1.0)
 _TEXT = NSColor.labelColor()
-_OK = NSColor.systemGreenColor()
-_BAD = NSColor.systemRedColor()
 
 
 def _label(text, x, y, w, h, size=13.0, bold=False, color=None, wrap=False):
@@ -81,9 +85,7 @@ def _button(title, x, y, w, h, target, action, primary=False):
     return b
 
 
-def _load_config() -> dict:
-    import yaml
-    cfg_path = ROOT / "config.yaml"
+def _load_config(cfg_path: Path) -> dict:
     if not cfg_path.is_file():
         return {}
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
@@ -110,10 +112,24 @@ def _ollama_models() -> list[str]:
         return []
 
 
-def _save_llm_config(provider: str, base_url: str, model: str,
+def _write_config(cfg: Path, content: str) -> None:
+    # 先写临时文件，再原子替换，避免翻译时读到只写了一部分的配置。
+    cfg = cfg.resolve(strict=True)
+    mode = cfg.stat().st_mode & 0o777
+    with NamedTemporaryFile(dir=cfg.parent, mode="w", encoding="utf-8", delete=False) as file:
+        temp = Path(file.name)
+        try:
+            file.write(content)
+            file.close()
+            temp.chmod(mode)
+            temp.replace(cfg)
+        finally:
+            temp.unlink(missing_ok=True)
+
+
+def _save_llm_config(cfg: Path, provider: str, base_url: str, model: str,
                      keep_alive: str, api_key: str) -> None:
     """精准替换 config.yaml 的 llm 段活动行（注释与其余段落原样保留）。"""
-    cfg = ROOT / "config.yaml"
     lines = cfg.read_text(encoding="utf-8").splitlines()
     start = next(i for i, ln in enumerate(lines) if ln.startswith("llm:"))
     end = next((i for i in range(start + 1, len(lines))
@@ -144,23 +160,112 @@ def _save_llm_config(provider: str, base_url: str, model: str,
         for k in missing:
             lines.insert(insert_at, f"  {k}: {new_kv[k]}")
             insert_at += 1
-    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _write_config(cfg, "\n".join(lines) + "\n")
 
-    if provider == "openai" and api_key:
+    if provider == "openai" and api_key and api_key != _load_env_key():
         (ROOT / ".env").write_text(f"DEEPSEEK_API_KEY={api_key}\n", encoding="utf-8")
 
 
+def _save_translation_config(cfg: Path, target_language: str) -> None:
+    """精准写回 translation.target_language，保留配置文件的其他内容与注释。"""
+    target_language = target_language.strip()
+    if not target_language:
+        raise ValueError("请输入翻译目标语言")
+    cfg = cfg.resolve(strict=True)
+    original = cfg.read_text(encoding="utf-8")
+    expected = yaml.safe_load(original)
+    doc = yaml.compose(original)
+    if not isinstance(doc, yaml.MappingNode) or doc.flow_style:
+        raise ValueError("配置文件应使用分行的 YAML 键值格式")
+
+    values = expected.get("translation")
+    options = (values if isinstance(values, dict) else {}) | {"target_language": target_language}
+    expected["translation"] = options
+    section = next((v for k, v in doc.value if k.value == "translation"), None)
+    scalar = json.dumps(target_language, ensure_ascii=False)
+    field = f"target_language: {scalar}"
+    if section is None:
+        start = end = doc.end_mark.index
+        prefix = "" if original[:start].endswith("\n") else "\n"
+        indent = " " * doc.start_mark.column
+        replacement = f"{prefix}\n{indent}translation:\n{indent}  {field}\n"
+    elif isinstance(section, yaml.MappingNode) and not section.flow_style:
+        target = next((v for k, v in section.value if k.value == "target_language"), None)
+        if target is None:
+            mark = section.start_mark
+            start = end = mark.index
+            replacement = f"{field}\n{' ' * mark.column}"
+        else:
+            start, end = target.start_mark.index, target.end_mark.index
+            replacement = f" {scalar}" if start == end else scalar
+            if target.end_mark.line > target.start_mark.line:
+                replacement += "\n"
+    else:
+        start, end = section.start_mark.index, section.end_mark.index
+        replacement = yaml.safe_dump(options, default_flow_style=True, width=float("inf")).strip()
+        if start == end:
+            replacement = " " + replacement
+
+    updated = original[:start] + replacement + original[end:]
+    if yaml.safe_load(updated) != expected:
+        raise ValueError("无法只修改翻译语言，请检查 translation 配置格式")
+    if updated != original:
+        _write_config(cfg, updated)
+
+
+def _ask_web_search_enabled(cfg: dict) -> bool:
+    """只接受 YAML 的布尔值，旧配置或无效值均安全地关闭。"""
+    return cfg.get("ask_web_search") is True
+
+
+def _save_ask_web_search_config(cfg: Path, enabled: bool) -> None:
+    """精准写回顶层 ask_web_search，保留其他配置和注释。"""
+    if type(enabled) is not bool:
+        raise ValueError("联网搜索设置必须为开或关")
+    cfg = cfg.resolve(strict=True)
+    original = cfg.read_text(encoding="utf-8")
+    expected = yaml.safe_load(original)
+    doc = yaml.compose(original)
+    if not isinstance(doc, yaml.MappingNode) or doc.flow_style:
+        raise ValueError("配置文件应使用分行的 YAML 键值格式")
+    if not isinstance(expected, dict):
+        raise ValueError("配置文件应为 YAML 映射")
+
+    expected["ask_web_search"] = enabled
+    value = next((node for key, node in doc.value if key.value == "ask_web_search"), None)
+    scalar = "true" if enabled else "false"
+    if value is None:
+        start = end = doc.end_mark.index
+        prefix = "" if original[:start].endswith("\n") else "\n"
+        indent = " " * doc.start_mark.column
+        replacement = f"{prefix}\n{indent}ask_web_search: {scalar}\n"
+    else:
+        start, end = value.start_mark.index, value.end_mark.index
+        replacement = f" {scalar}" if start == end else scalar
+        if value.end_mark.line > value.start_mark.line:
+            replacement += "\n"
+    updated = original[:start] + replacement + original[end:]
+    if yaml.safe_load(updated) != expected:
+        raise ValueError("无法只修改 Ask 联网搜索设置，请检查配置格式")
+    if updated != original:
+        _write_config(cfg, updated)
+
+
 class SettingsController(NSObject):
-    def init(self):
+    def initWithConfigPath_(self, config_path):
         self = objc.super(SettingsController, self).init()
         if self is None:
             return None
-        cfg = _load_config()
+        self._config_path = Path(config_path)
+        cfg = _load_config(self._config_path)
         llm = cfg.get("llm", {})
         self._provider = llm.get("provider", "openai")
         self._cfg = cfg
         self._build_window()
         self._load_values(llm)
+        self._saved_model_settings = self._model_settings()
+        self._ask_web_search = _ask_web_search_enabled(cfg)
+        self._f_ask_web_search.setState_(1 if self._ask_web_search else 0)
         self._refresh_usage()
         return self
 
@@ -175,9 +280,10 @@ class SettingsController(NSObject):
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
             NSBackingStoreBuffered, False)
         self._win.setTitle_("WaveType 设置")
+        self._win.setReleasedWhenClosed_(False)
+        self._win.setDelegate_(self)
         c = self._win.contentView()
         w = WIN_W - 48
-
         c.addSubview_(_label("润色模型", 24, WIN_H - 46, w, 22, size=17.0, bold=True))
 
         # 提供方切换
@@ -206,8 +312,6 @@ class SettingsController(NSObject):
         self._cloud_box.addSubview_(_label("API Key", 0, 72, 90, 20, size=12.0, color=_GRAY))
         self._f_key = _field("", 92, 70, cw - 202, secure=True)
         self._cloud_box.addSubview_(self._f_key)
-        self._btn_test_cloud = _button("测试连接", cw - 100, 68, 100, 28, self, "testCloud:")
-        self._cloud_box.addSubview_(self._btn_test_cloud)
         self._cloud_status = _label("", 0, 30, cw, 34, size=12.0, wrap=True)
         self._cloud_box.addSubview_(self._cloud_status)
         self._cloud_box.addSubview_(_label(
@@ -221,25 +325,36 @@ class SettingsController(NSObject):
         self._f_omodel = NSComboBox.alloc().initWithFrame_(NSMakeRect(92, 142, cw - 202, 26))
         self._f_omodel.addItemsWithObjectValues_(_ollama_models())
         self._local_box.addSubview_(self._f_omodel)
-        self._btn_reload_models = _button("刷新列表", cw - 100, 140, 100, 28, self, "reloadModels:")
-        self._local_box.addSubview_(self._btn_reload_models)
         self._local_box.addSubview_(_label("keep_alive", 0, 108, 90, 20, size=12.0, color=_GRAY))
         self._f_keep = _field("", 92, 106, 120)
         self._local_box.addSubview_(self._f_keep)
         self._local_box.addSubview_(_label(
             "模型驻留时长，避免闲置卸载后首句重新加载（约 30s）。",
             222, 108, cw - 222, 20, size=11.0, color=_GRAY))
-        self._btn_test_local = _button("检测 Ollama", 92, 66, 120, 28, self, "testLocal:")
-        self._local_box.addSubview_(self._btn_test_local)
         self._local_status = _label("", 0, 26, cw, 34, size=12.0, wrap=True)
         self._local_box.addSubview_(self._local_status)
         c.addSubview_(self._local_box)
 
+        # ---- 翻译输出语言 ----
+        fy = WIN_H - 300
+        self._build_translation_section(c, fy, w)
+
+        # ---- Ask 联网搜索 ----
+        sy = fy - 112
+        c.addSubview_(_label("Ask 联网搜索", 24, sy, 200, 20, size=14.0, bold=True))
+        self._f_ask_web_search = NSButton.alloc().initWithFrame_(NSMakeRect(24, sy - 34, 260, 24))
+        self._f_ask_web_search.setButtonType_(3)
+        self._f_ask_web_search.setTitle_("允许 Ask 按需联网搜索")
+        self._f_ask_web_search.setAccessibilityLabel_("Ask 联网搜索")
+        c.addSubview_(self._f_ask_web_search)
+        c.addSubview_(_label(
+            "仅 DeepSeek 的 deepseek-flash 云端模型可用。搜索由模型决定，搜索本身不单独收费，"
+            "网页内容产生的模型 Token 会计费。保存后下一次 Ask 生效。",
+            24, sy - 74, w, 42, size=11.0, color=_GRAY, wrap=True))
+
         # ---- Token 用量区 ----
-        ty = WIN_H - 300
+        ty = sy - 108
         c.addSubview_(_label("Token 用量", 24, ty, 200, 20, size=14.0, bold=True))
-        self._btn_refresh = _button("刷新", WIN_W - 114, ty - 4, 90, 26, self, "refreshUsage:")
-        c.addSubview_(self._btn_refresh)
         self._usage_today = _label("", 24, ty - 30, w, 20, size=12.0)
         self._usage_total = _label("", 24, ty - 52, w, 20, size=12.0)
         c.addSubview_(self._usage_today)
@@ -252,13 +367,28 @@ class SettingsController(NSObject):
         c.addSubview_(_label(
             "云端取 API 返回的 usage 字段；本地取 Ollama 的 eval_count。只统计 LLM 文本，"
             "ASR 语音识别在本机运行、无 token 概念。",
-            24, ty - 152, w, 40, size=11.0, color=_GRAY, wrap=True))
+            24, ty - 166, w, 32, size=11.0, color=_GRAY, wrap=True))
 
-        # ---- 底部 ----
-        self._save_status = _label("", 24, 22, 300, 22, size=12.0, wrap=True)
-        c.addSubview_(self._save_status)
-        c.addSubview_(_button("保存", WIN_W - 224, 18, 96, 30, self, "save:", primary=True))
-        c.addSubview_(_button("关闭", WIN_W - 118, 18, 94, 30, self, "closeWindow:"))
+        self._build_buttons(c)
+
+    def _build_translation_section(self, view, y, width):
+        view.addSubview_(_label("翻译", 24, y, 200, 20, size=14.0, bold=True))
+        view.addSubview_(_label("输出语言", 24, y - 34, 90, 20, size=12.0, color=_GRAY))
+        self._f_target = NSComboBox.alloc().initWithFrame_(NSMakeRect(116, y - 38, 260, 28))
+        self._f_target.setEditable_(True)
+        self._f_target.setAccessibilityLabel_("输出语言")
+        self._f_target.setNumberOfVisibleItems_(10)
+        self._translation_target = translation_target(self._cfg)
+        self._f_target.addItemsWithObjectValues_(list(TRANSLATE_LANGUAGE_LABELS.values()))
+        self._f_target.setStringValue_(TRANSLATE_LANGUAGE_LABELS.get(
+            self._translation_target, self._translation_target))
+        view.addSubview_(self._f_target)
+        view.addSubview_(_label(
+            "可从下拉列表选择，也可直接输入语言名。保存后的下一次翻译会使用所选语言。",
+            24, y - 82, width, 36, size=11.0, color=_GRAY, wrap=True))
+
+    def _build_buttons(self, c):
+        c.addSubview_(_button("保存并关闭", WIN_W - 140, 18, 116, 30, self, "save:", primary=True))
 
     def _load_values(self, llm: dict):
         self._radio_cloud.setState_(1 if self._provider == "openai" else 0)
@@ -289,57 +419,6 @@ class SettingsController(NSObject):
         self._radio_local.setState_(1)
         self._sync_boxes()
 
-    # ---------- 测试 ----------
-
-    def testCloud_(self, s):
-        self._cloud_status.setTextColor_(_GRAY)
-        self._cloud_status.setStringValue_("检测中…")
-        key = self._f_key.stringValue().strip()
-        base = self._f_base.stringValue().strip().rstrip("/")
-        if not key.startswith("sk-"):
-            self._cloud_status.setTextColor_(_BAD)
-            self._cloud_status.setStringValue_("key 格式不对（应以 sk- 开头）")
-            return
-        try:
-            import httpx
-            r = httpx.get(f"{base}/v1/models",
-                          headers={"Authorization": f"Bearer {key}"},
-                          timeout=15.0, trust_env=False)
-            if r.status_code == 200:
-                self._cloud_status.setTextColor_(_OK)
-                self._cloud_status.setStringValue_("✓ 连接成功，密钥有效")
-            else:
-                self._cloud_status.setTextColor_(_BAD)
-                self._cloud_status.setStringValue_(
-                    f"✗ HTTP {r.status_code}：密钥无效或额度不足")
-        except Exception as e:
-            self._cloud_status.setTextColor_(_BAD)
-            self._cloud_status.setStringValue_(f"✗ 网络不通：{type(e).__name__}")
-
-    def testLocal_(self, s):
-        self._local_status.setTextColor_(_GRAY)
-        self._local_status.setStringValue_("检测中…")
-        if not shutil.which("ollama"):
-            self._local_status.setTextColor_(_BAD)
-            self._local_status.setStringValue_("✗ 未找到 ollama，请先 brew install ollama")
-            return
-        models = _ollama_models()
-        want = self._f_omodel.stringValue().strip()
-        if any(m == want or m.startswith(want) for m in models):
-            self._local_status.setTextColor_(_OK)
-            self._local_status.setStringValue_(f"✓ Ollama 运行中，{want} 已就位")
-        elif models:
-            self._local_status.setTextColor_(_BAD)
-            self._local_status.setStringValue_(
-                f"Ollama 在运行，但缺 {want}：ollama pull {want}")
-        else:
-            self._local_status.setTextColor_(_BAD)
-            self._local_status.setStringValue_("✗ 无法读取模型列表（Ollama 服务未启动？）")
-
-    def reloadModels_(self, s):
-        self._f_omodel.removeAllItems()
-        self._f_omodel.addItemsWithObjectValues_(_ollama_models())
-
     # ---------- Token 用量 ----------
 
     def _refresh_usage(self):
@@ -347,7 +426,7 @@ class SettingsController(NSObject):
         mem = self._cfg.get("memory", {})
         db = Path(mem.get("db", "data/memory.db")).expanduser()
         if not db.is_absolute():
-            db = ROOT / db
+            db = self._config_path.parent / db
         s = UsageLogger(db).summary()
         tp, tc = s["today"]
         ap, ac = s["total"]
@@ -362,37 +441,60 @@ class SettingsController(NSObject):
             else:
                 lbl.setStringValue_("")
 
-    def refreshUsage_(self, s):
-        self._refresh_usage()
-
     # ---------- 保存 / 关闭 ----------
+
+    def _model_settings(self) -> dict[str, str]:
+        model = self._f_model if self._provider == "openai" else self._f_omodel
+        return dict(provider=self._provider,
+                    base_url=self._f_base.stringValue().strip(),
+                    model=model.stringValue().strip(),
+                    keep_alive=self._f_keep.stringValue().strip(),
+                    api_key=self._f_key.stringValue().strip())
 
     def save_(self, s):
         try:
-            _save_llm_config(
-                provider=self._provider,
-                base_url=self._f_base.stringValue().strip(),
-                model=(self._f_model if self._provider == "openai"
-                       else self._f_omodel).stringValue().strip(),
-                keep_alive=self._f_keep.stringValue().strip(),
-                api_key=self._f_key.stringValue().strip())
-            self._save_status.setTextColor_(_OK)
-            self._save_status.setStringValue_("✓ 已保存，重启 WaveType 后生效")
+            self._win.endEditingFor_(None)
+            language = self._f_target.stringValue().strip()
+            if not language:
+                raise ValueError("请输入翻译目标语言")
+            target = next((value for value, label in TRANSLATE_LANGUAGE_LABELS.items()
+                           if language == label), language)
+            ask_web_search = bool(self._f_ask_web_search.state())
+            model_settings = self._model_settings()
+            if model_settings != self._saved_model_settings:
+                _save_llm_config(self._config_path, **model_settings)
+                self._saved_model_settings = model_settings
+            if target != self._translation_target:
+                _save_translation_config(self._config_path, target)
+                self._translation_target = target
+            if ask_web_search != self._ask_web_search:
+                _save_ask_web_search_config(self._config_path, ask_web_search)
+                self._ask_web_search = ask_web_search
+            self._win.performClose_(None)
         except Exception as e:
-            self._save_status.setTextColor_(_BAD)
-            self._save_status.setStringValue_(f"✗ 保存失败：{type(e).__name__}: {e}")
+            self._show_save_error(str(e))
 
-    def closeWindow_(self, s):
+    def _show_save_error(self, message: str) -> None:
+        from AppKit import NSAlert, NSAlertStyleCritical
+        alert = NSAlert.alloc().init()
+        alert.setAlertStyle_(NSAlertStyleCritical)
+        alert.setMessageText_("设置未保存")
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("好")
+        alert.beginSheetModalForWindow_completionHandler_(self._win, None)
+
+    def windowWillClose_(self, notification):
         from AppKit import NSApp
         NSApp.terminate_(None)
 
 
-def run() -> None:
+def run(config_path: Path = ROOT / "config.yaml") -> None:
     from AppKit import NSApplicationActivationPolicyRegular
     from PyObjCTools import AppHelper
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
-    SettingsController.alloc().init()
+    controller = SettingsController.alloc().initWithConfigPath_(str(config_path.expanduser()))
+    controller._win.makeKeyAndOrderFront_(None)
     app.activateIgnoringOtherApps_(True)
     AppHelper.runEventLoop()
 

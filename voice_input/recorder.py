@@ -50,16 +50,32 @@ class Recorder:
 
     def stop(self) -> np.ndarray:
         with self._lock:
-            self._recording = False
-            if self._stream is not None:
-                self._stream.stop()
-                self._stream.close()
-                self._stream = None
-            frames = self._frames
-            self._frames = []
+            self._close_stream(discard=False)
+            frames, self._frames = self._frames, []
         audio = np.concatenate(frames) if frames else np.zeros(0, dtype=np.float32)
         log.info("录音结束: %.1fs", len(audio) / SAMPLE_RATE)
         return audio.reshape(-1)
+
+    def cancel(self) -> None:
+        """立刻关闭麦克风并丢弃录音，跳过音频拼接。"""
+        with self._lock:
+            try:
+                self._close_stream(discard=True)
+            finally:
+                self._frames = []
+                self.level = 0.0
+
+    def _close_stream(self, *, discard: bool) -> None:
+        self._recording = False
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                if discard:
+                    stream.abort()
+                else:
+                    stream.stop()
+            finally:
+                stream.close()
 
     def _cb(self, indata, frames, time_info, status) -> None:
         if status:

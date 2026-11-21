@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from threading import Event
 
 import Quartz
 
@@ -41,23 +42,34 @@ def _post_text(s: str) -> None:
 
 
 def type_text(text: str, chars_per_second: float = 40.0, initial_delay_ms: int = 50,
-              can_type: Callable[[str], bool] | None = None) -> str:
-    """向焦点输入；焦点变化时停止并返回尚未输入的文本。"""
+              can_type: Callable[[str], bool] | None = None,
+              cancel_event: Event | None = None) -> str:
+    """向焦点输入；取消或焦点变化时停止并返回尚未输入的文本。"""
     if not text:
         return ""
-    time.sleep(initial_delay_ms / 1000.0)
+
+    def wait(delay: float) -> bool:
+        if cancel_event is not None:
+            return cancel_event.wait(delay)
+        time.sleep(delay)
+        return False
+
+    if wait(initial_delay_ms / 1000.0):
+        return text
     blocks = _chunks(text)
     interval = _MAX_UNICHARS / max(chars_per_second, 1.0)
     t0 = time.monotonic()
     for i, block in enumerate(blocks):
         if can_type is not None and not can_type("".join(blocks[:i])):
             return "".join(blocks[i:])
+        if cancel_event is not None and cancel_event.is_set():
+            return "".join(blocks[i:])
         _post_text(block)
         # 匀速节流：按字符数对齐目标速度，避免长文本越打越快
         target = t0 + (i + 1) * interval
         delay = target - time.monotonic()
-        if delay > 0 and i + 1 < len(blocks):
-            time.sleep(delay)
+        if delay > 0 and i + 1 < len(blocks) and wait(delay):
+            return "".join(blocks[i + 1:])
     log.info("注入完成: %d 字 (%.1fs)", len(text), time.monotonic() - t0)
     return ""
 

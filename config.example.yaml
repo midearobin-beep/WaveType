@@ -41,8 +41,16 @@ hotkey:
   # 纠错手势：选中你改正后的文本，按住 Ctrl 点按 Fn → 学习纠错对
 
 modes:
-  translate: true         # Fn+Shift 中英自动互译（说中文出英文，说英文出中文）
+  translate: true         # Fn+Shift 翻译模式：中文或英文口述，统一输出目标语言
   ask: true               # Fn+Space 语音问答；选中文本后可语音编辑（"把这段改成…"）
+
+# Ask 的联网搜索：仅 provider=openai、base_url=https://api.deepseek.com、model=deepseek-flash 时可用。
+# 模型自行决定是否搜索；网页内容会计入模型 Token，用量按 DeepSeek 模型价格计算。
+ask_web_search: false
+
+translation:
+  target_language: Russian  # 目标语言名称，默认俄语，也可填 Japanese、French 等
+
 commands: true            # 语音命令：整句"换行/撤销/全选/保存…"直接发按键，不进 LLM
 
 # 支持 Markdown 的 App（前台 App 名子串匹配），命中后允许输出列表/粗体。

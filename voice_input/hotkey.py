@@ -8,6 +8,7 @@ Fn 在 macOS 上不是普通按键，走 flagsChanged 事件，
 - Fn + Shift    ：翻译模式（点按进场，说话，点按 Fn 收尾）
 - Fn + Space    ：Ask 模式（点按进场，说话，点按 Fn 收尾）
 - Ctrl + Fn     ：纠错学习（读选区 → 学纠错对）
+- Esc           ：取消当前语音输入
 
 备用触发键（alt_key）—— Fn 被系统层吞掉时的替代方案：
 - right_option  ：单击右侧 Option，等效「点按 Fn」开关口述
@@ -33,6 +34,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import Quartz
 
@@ -45,25 +47,32 @@ _ALT_FLAG = 0x80000    # kCGEventFlagMaskAlternate
 _CMD_FLAG = 0x100000   # kCGEventFlagMaskCommand
 _RIGHT_ALT_BIT = 0x40  # NX_DEVICERALTKEYMASK：右 Option 的设备位
 _SPACE_KEYCODE = 0x31
+_ESC_KEYCODE = 0x35
 _CHORD_GRACE_S = 0.6   # Fn 先落、Shift 后至的组合键纠错窗口
 _CTRL_DOUBLE_S = 0.45  # 连按两下 Ctrl 的间隔窗口
+
+
+@dataclass
+class VoiceSession:
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    finished: bool = False
 
 
 class FnHotkey:
     """Fn 口述 + Fn+Shift 翻译 + Fn+Space 问答 + Ctrl+Fn 纠错捕获。
 
     回调签名：
-    - on_press(mode)   mode ∈ "dictate" | "translate" | "ask"
-    - on_release(mode) 录音结束，按 mode 走对应管线
-    - on_cancel()      口述刚启动就被升级为翻译（Fn 先落的 Fn+Shift chord）
+    - on_press(mode, session)   mode ∈ "dictate" | "translate" | "ask"
+    - on_release(mode, session) 录音结束，按 mode 走对应管线
+    - on_cancel(session, recording) Esc 取消，或组合键升级时丢弃前一段录音
     - on_correct()     Ctrl+Fn 纠错学习
     """
 
-    def __init__(self, on_press: Callable[[str], None],
-                 on_release: Callable[[str], None],
+    def __init__(self, on_press: Callable[[str, VoiceSession], None],
+                 on_release: Callable[[str, VoiceSession], None],
                  mode: str = "hold",
                  on_correct: Callable[[], None] | None = None,
-                 on_cancel: Callable[[], None] | None = None,
+                 on_cancel: Callable[[VoiceSession, bool], None] | None = None,
                  translate_enabled: bool = True,
                  ask_enabled: bool = True,
                  alt_key: str | None = None) -> None:
@@ -76,6 +85,7 @@ class FnHotkey:
         self._ask_enabled = ask_enabled
         self._fn_down = False
         self._shift_down = False
+        self._fn_cancelled = False
         # 备用触发键：Fn 拿不到事件时的替代入口
         self._alt_hotkey = (alt_key or "").strip().lower() or None
         self._right_alt_down = False
@@ -84,6 +94,8 @@ class FnHotkey:
         self._active: str | None = None    # 当前录音模式（None = 空闲）
         self._active_since = 0.0           # 当前模式启动时刻（chord 纠错窗口用）
         self._space_swallowed = False      # Fn+Space 的 keyUp 也要一并吞掉
+        self._escape_swallowed = False
+        self._session: VoiceSession | None = None
         self._loop = None
         # 回调工作队列：tap 回调里只入队不干活。录音启动、选区读取（含 0.15s
         # 剪贴板兜底）都是毫秒~百毫秒级阻塞，直接在 tap 线程跑会被系统判定
@@ -116,21 +128,23 @@ class FnHotkey:
         return event
 
     def _on_key(self, event_type, event):
-        """Fn+Space 检测与吞事件。"""
+        """检测 Fn+Space 和 Esc，并成对吞掉已处理的按键事件。"""
         keycode = Quartz.CGEventGetIntegerValueField(
             event, Quartz.kCGKeyboardEventKeycode)
+        if keycode == _ESC_KEYCODE:
+            return self._on_escape(event_type, event)
         if keycode != _SPACE_KEYCODE:
             return event
         if event_type == Quartz.kCGEventKeyDown:
             flags = Quartz.CGEventGetFlags(event)
-            if self._ask_enabled and (flags & _FN_FLAG):
+            if self._ask_enabled and (flags & _FN_FLAG) and not self._fn_cancelled:
                 # Fn+Space 的正常手法是先按住 Fn 再敲 Space：Fn 落下沿会先把
                 # 口述启动，Space 晚几十~几百毫秒才到——与 Fn+Shift 一样做
                 # chord 纠错：在宽限窗口内取消口述、升级为 Ask。
                 if (self._active == "dictate"
                         and time.monotonic() - self._active_since < _CHORD_GRACE_S):
                     log.debug("Fn+Space（Fn 先落）→ 取消口述改走 ask")
-                    self._cancel_dictate()
+                    self._cancel_session()
                 log.debug("Fn+Space → ask")
                 self._space_swallowed = True
                 self._start("ask")
@@ -142,11 +156,30 @@ class FnHotkey:
             return None
         return event
 
+    def _on_escape(self, event_type, event):
+        if event_type == Quartz.kCGEventKeyUp:
+            if self._escape_swallowed:
+                self._escape_swallowed = False
+                return None
+            return event
+        if self._escape_swallowed:
+            return None
+        flags = Quartz.CGEventGetFlags(event)
+        modified = flags & (_SHIFT_FLAG | _ALT_FLAG | _CMD_FLAG | _CTRL_FLAG)
+        repeat = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventAutorepeat)
+        if modified or repeat or not self._cancel_session():
+            return event
+        self._escape_swallowed = True
+        self._fn_cancelled = self._fn_down
+        return None
+
     def _on_flags(self, event) -> None:
         flags = Quartz.CGEventGetFlags(event)
         fn = bool(flags & _FN_FLAG)
         shift = bool(flags & _SHIFT_FLAG)
         ctrl = bool(flags & _CTRL_FLAG)
+        if not fn:
+            self._fn_cancelled = False
         log.debug("flagsChanged flags=%#x fn=%s shift=%s", flags, fn, shift)
 
         # 备用触发键（Fn 被系统层吞掉时唯一入口）
@@ -155,7 +188,8 @@ class FnHotkey:
 
         # Shift 按下沿（Fn 已按住）：
         started_now = False
-        if shift and not self._shift_down and fn and self._translate_enabled:
+        if (shift and not self._shift_down and fn and self._translate_enabled
+                and not self._fn_cancelled):
             if self._active is None:
                 log.debug("Fn+Shift → translate")
                 self._start("translate")
@@ -164,7 +198,7 @@ class FnHotkey:
                   and time.monotonic() - self._active_since < _CHORD_GRACE_S):
                 # Fn 先落的 chord：刚开的口述取消，升级为翻译
                 log.debug("Fn+Shift（Fn 先落）→ 取消口述改走 translate")
-                self._cancel_dictate()
+                self._cancel_session()
                 self._start("translate")
                 started_now = True
 
@@ -238,17 +272,28 @@ class FnHotkey:
         # hold 模式下口述按住说话；translate/ask 恒为点按进场
         self._active = mode
         self._active_since = time.monotonic()
-        self._safe_call(self._on_press, mode)
+        self._session = VoiceSession()
+        self._safe_call(self._on_press, mode, self._session)
 
     def _finish(self) -> None:
         mode, self._active = self._active, None
-        if mode is not None:
-            self._safe_call(self._on_release, mode)
+        if mode is not None and self._session is not None:
+            self._safe_call(self._on_release, mode, self._session)
 
-    def _cancel_dictate(self) -> None:
+    def _cancel_session(self) -> bool:
+        session = self._session
+        if session is None or session.finished or session.cancelled.is_set():
+            return False
+        recording = self._active is not None
         self._active = None
+        # 立即发出取消信号，录音关闭等阻塞操作交给回调队列。
+        session.cancelled.set()
         if self._on_cancel is not None:
-            self._safe_call(self._on_cancel)
+            self._safe_call(self._on_cancel, session, recording)
+        return True
+
+    def is_latest_session(self, session: VoiceSession) -> bool:
+        return session is self._session
 
     def _safe_call(self, fn, *args) -> None:
         """回调一律走工作队列，tap 线程即刻返回（防超时禁用）。"""

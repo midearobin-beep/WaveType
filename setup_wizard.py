@@ -273,7 +273,7 @@ class WizardController(NSObject):
         w = self._body.frame().size.width
 
         keys = [("Fn", "口述：按住说话，松开/再按收尾"),
-                ("Fn + Shift", "中英互译（说中文出英文，反之亦然）"),
+                ("Fn + Shift", "翻译模式（中文或英文口述，默认输出俄语；可在设置中修改）"),
                 ("Fn + Space", "语音问答；选中文本后可说「把这段改成…」"),
                 ("Ctrl + Fn", "纠错学习：选中改正后的文本按下")]
         y = 236

@@ -2,7 +2,7 @@
 
 - 常驻菜单栏语音气泡图标，template 渲染，深浅色自适应
 - 录音时图标旁显示单色圆点；菜单中显示模式名（听写/翻译/问答）
-- 菜单：状态 / 词典与风格画像统计 / 打开配置文件 / 退出
+- 菜单：状态 / 词典与风格画像统计 / 设置 / 打开配置文件 / 重启 / 退出
 
 必须在主线程创建（NSApplication 就绪后）；所有更新经 AppHelper.callAfter
 marshal 回主线程，状态更新方法是纯 Python 方法即可被 callAfter 调用。
@@ -130,6 +130,11 @@ class StatusBarController:
 
         self._menu.addItem_(NSMenuItem.separatorItem())
 
+        settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "设置…", "openSettings:", "")
+        settings_item.setTarget_(self._target())
+        self._menu.addItem_(settings_item)
+
         open_cfg = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "打开配置文件", "openConfig:", "")
         open_cfg.setTarget_(self._target())
@@ -148,6 +153,14 @@ class StatusBarController:
         self._item.setMenu_(self._menu)
         log.info("菜单栏图标已创建")
 
+    def _open_settings(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        subprocess.Popen(
+            [sys.executable, str(root / "main.py"), "--settings",
+             "--config", str(self._config_path.resolve())],
+            cwd=root,
+        )
+
     # 菜单 action 需要一个 NSObject 目标；惰性创建一个，挂在本对象上
     def _target(self):
         if getattr(self, "_target_obj", None) is None:
@@ -156,6 +169,9 @@ class StatusBarController:
             controller = self
 
             class _Target(NSObject):
+                def openSettings_(self, _sender):
+                    controller._open_settings()
+
                 def openConfig_(self, _sender):
                     from AppKit import NSWorkspace
                     NSWorkspace.sharedWorkspace().openFile_(str(controller._config_path))

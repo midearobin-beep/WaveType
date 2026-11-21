@@ -1,9 +1,13 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from voice_input import inject, selection
 from voice_input.app import VoiceInputApp
+from voice_input.hotkey import VoiceSession
 from voice_input.polish import IncompleteCompletionError, Polisher
 
 
@@ -71,6 +75,17 @@ class InputSafetyTests(unittest.TestCase):
             rest = inject.type_text("a" * 20 + "b" * 5, can_type=lambda sent: not sent)
         self.assertEqual(posted, ["a" * 20])
         self.assertEqual(rest, "b" * 5)
+
+    def test_cancelling_during_injection_stops_before_the_next_chunk(self):
+        cancelled = Event()
+
+        def post(_text):
+            cancelled.set()
+
+        with patch.object(inject, "_post_text", side_effect=post) as posted:
+            rest = inject.type_text("a" * 20 + "tail", initial_delay_ms=0, cancel_event=cancelled)
+        posted.assert_called_once_with("a" * 20)
+        self.assertEqual(rest, "tail")
 
     def test_recheck_cursor_and_text_after_partial_insertion(self):
         target = selection.InputTarget(42, "App", "field", (1, 1), "abc")
@@ -159,6 +174,141 @@ class InputSafetyTests(unittest.TestCase):
         p._complete = Mock(side_effect=["准备报告，检查成本，提交审核。", "1. 准备报告\n2. 检查成本\n3. 提交审核"])
         self.assertIn("\n2.", p.polish(source))
         self.assertEqual(p._complete.call_count, 2)
+
+
+class TranslationConfigTests(unittest.TestCase):
+    def test_next_translation_uses_saved_language_in_same_app(self):
+        with TemporaryDirectory() as td:
+            config = Path(td) / "config.yaml"
+            config.write_text("llm: {api_key: test}\nautolearn: {enabled: false}\n"
+                              "translation: {target_language: English}\n", encoding="utf-8")
+            app = VoiceInputApp(config)
+            app._asr = SimpleNamespace(transcribe=Mock(return_value="你好"))
+            app._polisher._complete = Mock(return_value="Hello")
+            app._safe_type = Mock(return_value=True)
+
+            app._process([0], "translate")
+            self.assertIn("英语（English）", app._polisher._complete.call_args.args[0])
+
+            config.write_text("translation: {target_language: Serbian}\n", encoding="utf-8")
+            app._process([0], "translate")
+            self.assertIn("翻译成Serbian", app._polisher._complete.call_args.args[0])
+
+            config.write_text("translation: [", encoding="utf-8")
+            with self.assertLogs("voice_input.app", level="WARNING"):
+                app._process([0], "translate")
+            self.assertIn("翻译成Serbian", app._polisher._complete.call_args.args[0])
+
+
+class AskWebSearchTests(unittest.TestCase):
+    def test_native_deepseek_search_request_and_cited_answer(self):
+        p = Polisher(api_key="test", disable_thinking=False)
+        p.set_terms(["私人术语"])
+        p.set_style_profile("私人偏好")
+        p.set_usage_logger(Mock())
+        valid_source = {"type": "url_citation", "url_citation": {
+            "url": "https://example.com/release", "title": "Release notes"}}
+        response = Mock()
+        response.json.return_value = {
+            "choices": [{"finish_reason": "stop", "message": {
+                "content": "ANSWER\n已发布新版本。",
+                "annotations": [valid_source, valid_source, {"type": "url_citation", "url_citation": {
+                    "url": "file:///private/secret", "title": "Unsafe link"}}],
+            }}],
+            "usage": {"prompt_tokens": 2300, "completion_tokens": 80},
+        }
+        with patch("httpx.Client") as client:
+            post = client.return_value.__enter__.return_value.post
+            post.return_value = response
+            action, answer = p.ask("最新版本是什么", app="私人应用", window_title="私人窗口", web_search=True)
+            payload = post.call_args.kwargs["json"]
+            self.assertEqual(post.call_args.args[0], "https://api.deepseek.com/chat/completions")
+            self.assertEqual(payload["tools"], [{"type": "deepseek_web_search"}])
+            self.assertEqual(payload["thinking"], {"type": "disabled"})
+            for private in ("私人术语", "私人偏好", "私人应用", "私人窗口"):
+                self.assertNotIn(private, payload["messages"][0]["content"])
+        self.assertEqual(action, "answer")
+        self.assertIn("已发布新版本。\n\n来源\n1. Release notes", answer)
+        self.assertEqual(answer.count("https://example.com/release"), 1)
+        self.assertNotIn("file://", answer)
+        p._usage.log.assert_called_once_with("ask", "deepseek-flash", 2300, 80)
+
+    def test_search_only_for_opted_in_deepseek_ask_without_selection(self):
+        for base_url, web_search, selection_text in (
+            ("https://api.deepseek.com", False, None),
+            ("https://api.deepseek.com", True, "待改写选区"),
+            ("https://api.deepseek.com.example.org", True, None),
+        ):
+            with self.subTest(base_url=base_url, enabled=web_search, has_selection=bool(selection_text)):
+                p = Polisher(api_key="test", base_url=base_url)
+                response = Mock()
+                marker = "EDIT" if selection_text else "ANSWER"
+                response.json.return_value = {"choices": [{"finish_reason": "stop", "message": {
+                    "content": marker + "\n完成",
+                }}]}
+                with patch("httpx.Client") as client:
+                    post = client.return_value.__enter__.return_value.post
+                    post.return_value = response
+                    action, content = p.ask("处理", selection_text, web_search=web_search)
+                    self.assertNotIn("tools", post.call_args.kwargs["json"])
+                self.assertEqual((action, content), (marker.lower(), "完成"))
+
+    def test_app_rereads_search_toggle_before_next_question(self):
+        with TemporaryDirectory() as td:
+            config = Path(td) / "config.yaml"
+            base_config = "llm: {api_key: test}\nautolearn: {enabled: false}\n"
+            config.write_text(base_config, encoding="utf-8")
+            app = VoiceInputApp(config)
+            self.addCleanup(app._memory._conn.close)
+            app._asr = SimpleNamespace(transcribe=Mock(return_value="测试问题"))
+            app._polisher.ask = Mock(return_value=("answer", "测试答案"))
+            app._show_card = Mock()
+
+            for value, enabled in (("", False), ("true", True), ("false", False), ('"true"', False)):
+                with self.subTest(value=value):
+                    suffix = f"ask_web_search: {value}\n" if value else ""
+                    config.write_text(base_config + suffix, encoding="utf-8")
+                    app._process([0], "ask")
+                    self.assertIs(app._polisher.ask.call_args.kwargs["web_search"], enabled)
+            app._show_card.assert_called_with("测试答案", title="Ask", session=None)
+
+
+class VoiceCancellationTests(unittest.TestCase):
+    def test_cancellation_during_asr_prevents_model_request(self):
+        session = VoiceSession()
+        app = VoiceInputApp.__new__(VoiceInputApp)
+        app._markdown_apps = set()
+        app._stage_label = Mock()
+        app._polisher = Mock()
+
+        def transcribe(_audio):
+            session.cancelled.set()
+            return "测试语音"
+
+        app._asr = SimpleNamespace(transcribe=transcribe)
+        app._process([0], "translate", cursor_ctx={"session": session})
+        app._polisher.translate.assert_not_called()
+
+    def test_cancelled_llm_result_is_not_typed_or_saved(self):
+        session = VoiceSession()
+        app = VoiceInputApp.__new__(VoiceInputApp)
+        app._markdown_apps = set()
+        app._stage_label = Mock()
+        app._memory = Mock()
+        app._statusbar = None
+        app._hud = None
+        app._asr = SimpleNamespace(transcribe=Mock(return_value="测试语音"))
+        app._refresh_translation_target = Mock()
+
+        def translate(*args, **kwargs):
+            session.cancelled.set()
+            return "Test"
+
+        app._polisher = SimpleNamespace(translate=translate)
+        with patch("voice_input.app.type_text") as type_text:
+            app._process([0], "translate", cursor_ctx={"session": session})
+        type_text.assert_not_called()
+        app._memory.log_history.assert_not_called()
 
 
 if __name__ == "__main__":

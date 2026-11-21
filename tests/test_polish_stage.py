@@ -57,6 +57,19 @@ check("占位符已替换", "{format_rule}" not in sys_md and "{format_rule}" no
 tr_md = p._system(TRANSLATE_PROMPT, markdown=True)
 check("翻译 prompt Markdown 注记", MD_NOTE_MARKDOWN in tr_md)
 check("翻译 prompt 默认注记", MD_NOTE_PLAIN in p._system(TRANSLATE_PROMPT))
+ru_prompt = p._system(TRANSLATE_PROMPT)
+check("翻译默认输出俄语", "俄语（Russian）" in ru_prompt and "英译俄" in ru_prompt)
+check("俄语示例已注入", "Не могли бы вы" in ru_prompt)
+check("翻译占位符已替换", "{target_language}" not in ru_prompt
+      and "{translation_examples}" not in ru_prompt)
+en_prompt = Polisher(enabled=False, translate_target="English")._system(TRANSLATE_PROMPT)
+check("翻译可切换为英语", "英语（English）" in en_prompt
+      and "The proposal is feasible overall" in en_prompt)
+custom_prompt = Polisher(enabled=False, translate_target="Serbian (Latin script)")._system(
+    TRANSLATE_PROMPT)
+check("自定义语言原样传给模型", "Serbian (Latin script)" in custom_prompt
+      and "{translation_examples}" not in custom_prompt
+      and "Не могли бы вы" not in custom_prompt)
 
 print("== P0 光标上下文 ==")
 sys_ctx = p._system(SYSTEM_PROMPT, before="主题：项目进度汇报\n\n张工你好，", after="")

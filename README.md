@@ -4,7 +4,7 @@
 基于本地 MLX 模型的 Typeless 平替：语音转写、AI 清洗润色、波形 HUD、个人记忆。语音识别始终离线；润色层可切换本地 Ollama 或云端 OpenAI 兼容 API（如 DeepSeek）。
 
 > Press `Fn`, speak, press `Fn` again — polished text types itself into any app.
-> `Fn+Shift` translates between Chinese and English; `Fn+Space` lets you ask or edit with your voice.
+> `Fn+Shift` translates Chinese or English speech into Russian by default (configurable); `Fn+Space` lets you ask or edit with your voice.
 > Audio never leaves your Mac.
 
 ![WaveType demo](assets/demo.gif)
@@ -12,8 +12,9 @@
 ## ✨ Features
 
 - **Push-to-talk dictation** — tap `Fn` to start, tap again to finish; text is typed character-by-character via `CGEvent` Unicode injection (no clipboard, no IME interference, works in any app)
-- **Translate mode** — tap `Fn+Shift`, speak naturally, tap `Fn` to finish: Chinese ↔ English translation is typed at the cursor. Terms, model numbers and standards codes (AM4205, IEC 60335-2-40…) are preserved as-is
+- **Translate mode** — tap `Fn+Shift`, speak naturally, tap `Fn` to finish: Chinese or English speech is translated into the configured target language (Russian by default) and typed at the cursor. Terms, model numbers and standards codes (AM4205, IEC 60335-2-40…) are preserved as-is
 - **Ask mode** — tap `Fn+Space`, speak a question or command, tap `Fn` to finish. Answers appear in a floating card (your text is never touched); select text first and speak an edit command ("make this more professional") and the selection gets rewritten in place
+- **Ask web search** — for DeepSeek `deepseek-flash`, enable **Ask 联网搜索** in **设置…** and save. Starting with the next question asked without a text selection, Ask can search when needed and show clickable sources in its answer card. DeepSeek includes the search context in its normal model token billing.
 - **ASR stays local** — speech recognition always runs on-device via [Qwen3-ASR](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-8bit) (MLX, Apple Silicon native). The cleanup/translate/ask LLM can be a local Ollama model (fully offline) or an OpenAI-compatible cloud API (DeepSeek, Moonshot…) — only *text* ever leaves the machine
 - **Waveform HUD** — a Siri-inspired floating energy line: appears from its center while listening, collapses back into the center when done; `Listening` / `Thinking` states with distinct motion & color treatment
 - **Speech-gated visualization** — Silero VAD (onnxruntime, CPU) ensures only your voice drives the waveform; keyboard clicks, fans and door slams leave it perfectly flat. Visual gating only — ASR always receives the untouched raw audio
@@ -26,7 +27,7 @@
 - **Voice commands** — a whole-utterance match like `换行`, `撤销`, `全选`, `保存` sends the keystroke directly (never reaches the LLM); `换行换行` presses Return twice. Disable with `commands: false`
 - **Style profile** — edits are stored locally and sent to the configured LLM for distillation, automatically or with `python3 main.py style`. A cloud provider receives excerpts of both the original and edited text; the prompt requests abstract preferences but cannot guarantee the model omits original text. Disable automatic distillation with `style.enabled: false`.
 - **Deterministic dictionary layer** — beyond ASR hotwords + LLM prompt constraints, learned pairs are also hard-applied as a final regex/substring pass (FluidVoice-style), so "LLM ignored the dictionary" can no longer leak through. `llm.hard_apply_dict: false` to opt out
-- **Menu bar icon** — a monochrome speech bubble with a voice waveform adapts to the menu bar; a dot indicates recording. The menu offers dictionary/style stats, quick access to `config.yaml`, and Quit
+- **Menu bar icon** — a monochrome speech bubble with a voice waveform adapts to the menu bar; a dot indicates recording. Open **设置…** to choose or enter a translation language, then select **保存并关闭** to apply it to the next translation.
 - **Anti-hallucination guardrails** — fidelity-first prompt (deliberate repetition and courtesy words are kept, per FluidVoice's rules) + repetition-loop detection + length-ratio fallback to raw ASR output (relaxed automatically for mid-speech corrections and enumerations)
 
 ## 🎬 Demo
@@ -69,11 +70,13 @@ python3 main.py --setup              # re-open the wizard anytime
 ```bash
 source .venv/bin/activate
 python3 main.py              # start
-python3 main.py --settings   # settings GUI: model / API key / token usage
+python3 main.py --settings   # settings GUI: model / API key / translation / token usage
 python3 main.py --raw        # skip LLM cleanup, raw ASR output
 python3 main.py -v           # debug logs
 python3 main.py history      # recover the most recent results that were not typed
 ```
+
+If you installed the login service, run `bash deploy/launchagent.sh restart` to reopen WaveType after choosing **退出 WaveType** in the menu bar.
 
 Before typing or executing a voice command, WaveType checks that the original app, input field, text and selection still match. When the target changes or available text and selection details no longer match, typing stops and the remaining text is shown in a card and saved in local history. Some apps do not expose text or selection through Accessibility; in those apps only the available details and the focused app and field can be checked. If the field itself is unavailable but the focused window is available, WaveType checks the app and window only; it cannot detect a move between fields in that window. Switching focus during a long output can leave a partial insertion. Processing times for queueing, ASR, LLM and typing are logged; the configured dictionary and cloud provider can affect latency. Numbered-list detection is a best-effort format check, not a guarantee of factual completeness.
 
@@ -81,7 +84,8 @@ Before typing or executing a voice command, WaveType checks that the original ap
 |---|---|
 | Tap `Fn` | Start dictation (waveform appears) |
 | Tap `Fn` again | Stop → Thinking → polished text typed at cursor |
-| `Fn+Shift` → speak → `Fn` | Translate Chinese ↔ English, typed at cursor |
+| `Esc` while a voice input is active | Cancel the recording or discard a pending result |
+| `Fn+Shift` → speak → `Fn` | Translate Chinese or English speech into the configured target language (Russian by default) |
 | `Fn+Space` → speak → `Fn` | Ask anything — answer in a floating card |
 | Select text + `Fn+Space` → speak edit command → `Fn` | Rewrite the selection in place |
 | Select corrected text + `Ctrl+Fn` | Learn the correction pair into memory |
